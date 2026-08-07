@@ -1,0 +1,160 @@
+{
+  "services": [
+    {
+      "name": "api-gateway",
+      "host": "api-gateway-1",
+      "generator": "flog",
+      "normal_messages": [
+        "Received {method} request for {path}",
+        "Request completed with status {status} in {duration_ms}ms",
+        "Authenticated request for customer {customer_id}",
+        "Rate-limit check passed for client {client_id}"
+      ],
+      "warning_messages": [
+        "Upstream request for {path} exceeded {duration_ms}ms",
+        "Rate-limit threshold nearly reached for client {client_id}",
+        "Request returned status {status} for {method} {path}"
+      ],
+      "error_messages": [
+        "Upstream request failed with status {status}",
+        "Failed to route {method} request for {path}",
+        "Gateway could not reach checkout-service for {path}"
+      ]
+    },
+    {
+      "name": "checkout-service",
+      "host": "checkout-service-1",
+      "generator": "template",
+      "normal_messages": [
+        "Created checkout session {checkout_id} for customer {customer_id}",
+        "Loaded cart {cart_id} containing {item_count} items",
+        "Order {order_id} moved to payment authorization",
+        "Checkout request completed in {duration_ms}ms"
+      ],
+      "warning_messages": [
+        "Checkout session {checkout_id} took {duration_ms}ms to load",
+        "Cart {cart_id} required a retry before loading",
+        "Payment authorization for order {order_id} is still pending"
+      ],
+      "error_messages": [
+        "Failed to load cart {cart_id} for customer {customer_id}",
+        "Checkout request failed for order {order_id}",
+        "Unable to advance order {order_id} to payment authorization"
+      ]
+    },
+    {
+      "name": "payment-service",
+      "host": "payment-service-1",
+      "generator": "template",
+      "normal_messages": [
+        "Payment authorization succeeded for order {order_id}",
+        "Payment method tokenized for customer {customer_id}",
+        "Received provider response for payment {payment_id}",
+        "Payment ledger entry recorded for order {order_id}"
+      ],
+      "warning_messages": [
+        "Payment provider response delayed for payment {payment_id}",
+        "Payment retry scheduled for order {order_id}",
+        "Database connection pool utilization reached {percent}%",
+        "Payment worker memory usage increased to {memory_mb}MB after {uptime_minutes} minutes; possible memory leak detected",
+        "Payment worker heap utilization reached {percent}%"
+      ],
+      "error_messages": [
+        "Payment authorization failed for order {order_id}",
+        "Payment provider request timed out for payment {payment_id}",
+        "Failed to record payment ledger entry for order {order_id}",
+        "Payment worker exceeded memory limit at {memory_mb}MB",
+        "Payment authorization blocked while payment worker restarts"
+      ],
+      "critical_messages": [
+        "Payment worker killed by OOM after memory usage reached {memory_mb}MB",
+        "Payment service auto-restarted after process exit (restart {restart_count})",
+        "Payment service readiness probe failed after auto-restart"
+      ]
+    },
+    {
+      "name": "inventory-service",
+      "host": "inventory-service-1",
+      "generator": "template",
+      "normal_messages": [
+        "Reserved {item_count} items for order {order_id}",
+        "Inventory lookup completed for warehouse {warehouse}",
+        "Released reservation for cancelled order {order_id}",
+        "Stock synchronization completed in {duration_ms}ms"
+      ],
+      "warning_messages": [
+        "Inventory lookup for warehouse {warehouse} took {duration_ms}ms",
+        "Low stock threshold reached for order {order_id}",
+        "Reservation retry scheduled for order {order_id}"
+      ],
+      "error_messages": [
+        "Failed to reserve inventory for order {order_id}",
+        "Inventory lookup failed for warehouse {warehouse}",
+        "Stock synchronization failed after {duration_ms}ms"
+      ]
+    },
+    {
+      "name": "notification-service",
+      "host": "notification-service-1",
+      "generator": "template",
+      "normal_messages": [
+        "Queued {channel} notification for order {order_id}",
+        "Delivered {channel} notification to customer {customer_id}",
+        "Notification provider acknowledged message {message_id}",
+        "Notification retry queue is empty"
+      ],
+      "warning_messages": [
+        "{channel} notification for order {order_id} is delayed",
+        "Notification provider retry scheduled for message {message_id}",
+        "Notification queue depth reached {queue_depth}"
+      ],
+      "error_messages": [
+        "Failed to deliver {channel} notification for order {order_id}",
+        "Notification provider rejected message {message_id}",
+        "Unable to enqueue notification for customer {customer_id}"
+      ]
+    },
+    {
+      "name": "nginx",
+      "host": "nginx-1",
+      "generator": "flog",
+      "normal_messages": [
+        "Served {method} {path} with status {status} in {duration_ms}ms",
+        "Upstream connection reused for {path}",
+        "Access log recorded for client {client_id}",
+        "TLS session established for {path}"
+      ],
+      "warning_messages": [
+        "Upstream response for {path} exceeded {duration_ms}ms",
+        "Returned status {status} for {method} {path}",
+        "Upstream connection pool is nearing capacity"
+      ],
+      "error_messages": [
+        "Upstream unavailable while serving {path}",
+        "Failed to proxy {method} request for {path}",
+        "Returned gateway error status {status} for {path}"
+      ]
+    },
+    {
+      "name": "postgres",
+      "host": "postgres-1",
+      "generator": "template",
+      "normal_messages": [
+        "Connection acquired from pool for {client_service}",
+        "Completed {query_name} query in {duration_ms}ms",
+        "Checkpoint completed in {duration_ms}ms",
+        "Replication lag is {lag_ms}ms"
+      ],
+      "warning_messages": [
+        "Connection pool utilization reached {percent}%",
+        "{query_name} query exceeded {duration_ms}ms",
+        "Replication lag increased to {lag_ms}ms"
+      ],
+      "error_messages": [
+        "Failed to acquire database connection for {client_service}",
+        "{query_name} query aborted after connection timeout",
+        "Database connection pool exhausted for {client_service}"
+      ]
+    }
+  ]
+}
