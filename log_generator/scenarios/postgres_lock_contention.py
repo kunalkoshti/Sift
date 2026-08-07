@@ -1,6 +1,6 @@
 """PostgreSQL lock-contention incident causing checkout and payment failures."""
 
-from scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
+from log_generator.scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
 
 
 POSTGRES_LOCK_CONTENTION_SCENARIO = ScenarioDefinition(

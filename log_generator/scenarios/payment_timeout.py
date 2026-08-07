@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
+from log_generator.scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
 
 
 PAYMENT_TIMEOUT_SCENARIO = ScenarioDefinition(

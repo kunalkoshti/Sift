@@ -1,6 +1,6 @@
 """Notification-provider rate-limit incident causing delivery backlog."""
 
-from scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
+from log_generator.scenarios.base import GroundTruth, ScenarioDefinition, ScenarioEvent
 
 
 NOTIFICATION_RATE_LIMIT_SCENARIO = ScenarioDefinition(

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from schema import SCHEMA_VERSION, LogRecord
+from sift_common.schema import SCHEMA_VERSION, LogRecord
 
 
 @dataclass(frozen=True)

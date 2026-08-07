@@ -3,12 +3,12 @@ import json
 
 import pytest
 
-from adapter import load_service_catalog
-from generator import _write_live, generate_event_stream
-from pipeline import write_ground_truth, write_jsonl
-from reproducibility import create_generation_context
-from schema import LogRecord
-from scenarios import SCENARIOS
+from log_generator.adapter import load_service_catalog
+from log_generator.generator import _write_live, generate_event_stream
+from log_generator.pipeline import write_ground_truth, write_jsonl
+from log_generator.reproducibility import create_generation_context
+from sift_common.schema import LogRecord
+from log_generator.scenarios import SCENARIOS
 
 
 def _records(seed: int, scenario_id: str = "payment-timeout-v1") -> list[LogRecord]:
