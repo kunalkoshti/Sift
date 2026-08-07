@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["log_generator*", "log_collector*", "sift_common*"]
+include = ["log_generator*", "log_collector*", "log_consumer*", "sift_common*"]
 
 [project]
 name = "Sift"
@@ -28,4 +28,9 @@ log_collector = [
     "python-dotenv>=1,<2",
     "redis>=5,<6",
     "uvicorn[standard]>=0.30,<1",
+]
+log_consumer = [
+    "asyncpg>=0.29,<1",
+    "python-dotenv>=1,<2",
+    "redis>=5,<6",
 ]
