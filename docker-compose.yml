@@ -36,5 +36,45 @@ services:
       timeout: 5s
       retries: 10
 
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sift
+      POSTGRES_USER: sift
+      POSTGRES_PASSWORD: sift
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/001-raw-logs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sift -d sift"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  log-consumer:
+    build:
+      context: .
+      dockerfile: log_consumer/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      REDIS_STREAM: ${REDIS_STREAM:-sift-logs}
+      REDIS_GROUP: ${REDIS_GROUP:-sift-log-consumers}
+      REDIS_CONSUMER: ${REDIS_CONSUMER:-consumer-1}
+      REDIS_READ_COUNT: ${REDIS_READ_COUNT:-100}
+      REDIS_BLOCK_MS: ${REDIS_BLOCK_MS:-5000}
+      REDIS_GROUP_START_ID: ${REDIS_GROUP_START_ID:-0}
+      POSTGRES_DSN: postgresql://sift:sift@postgres:5432/sift
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
 volumes:
   redis-data:
+  postgres-data:
