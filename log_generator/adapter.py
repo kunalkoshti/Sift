@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from schema import SCHEMA_VERSION, LogRecord
+from sift_common.schema import SCHEMA_VERSION, LogRecord
 
 
 DEFAULT_SERVICES_PATH = Path(__file__).with_name("services.json")

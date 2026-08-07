@@ -1,3 +1,5 @@
+"""Canonical log-record schema shared by all Sift services."""
+
 from datetime import datetime
 from typing import Any, Literal
 

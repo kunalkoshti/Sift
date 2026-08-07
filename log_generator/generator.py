@@ -10,12 +10,12 @@ import string
 import time
 from typing import Any
 
-from adapter import load_service_catalog
-from pipeline import merge_records, open_output, write_ground_truth, write_jsonl
-from reproducibility import GenerationContext, create_generation_context
-from schema import SCHEMA_VERSION, LogRecord
-from scenarios import SCENARIOS
-from scenarios.base import ScenarioDefinition
+from log_generator.adapter import load_service_catalog
+from log_generator.pipeline import merge_records, open_output, write_ground_truth, write_jsonl
+from log_generator.reproducibility import GenerationContext, create_generation_context
+from sift_common.schema import SCHEMA_VERSION, LogRecord
+from log_generator.scenarios import SCENARIOS
+from log_generator.scenarios.base import ScenarioDefinition
 
 
 NOISE_START_SECONDS = -180

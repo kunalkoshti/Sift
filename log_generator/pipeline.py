@@ -9,7 +9,7 @@ from pathlib import Path
 import sys
 from typing import Any, Iterator, TextIO
 
-from schema import LogRecord
+from sift_common.schema import LogRecord
 
 
 def merge_records(
