@@ -5,10 +5,14 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable, Iterator
 from datetime import timedelta
+import os
+from pathlib import Path
 import random
 import string
 import time
 from typing import Any
+
+from dotenv import load_dotenv
 
 from log_generator.adapter import load_service_catalog
 from log_generator.pipeline import merge_records, open_output, write_ground_truth, write_jsonl
@@ -18,8 +22,9 @@ from log_generator.scenarios import SCENARIOS
 from log_generator.scenarios.base import ScenarioDefinition
 
 
-NOISE_START_SECONDS = -180
-NOISE_END_SECONDS = 120
+ROOT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ROOT_ENV_FILE)
+
 NOISE_CATEGORY_WEIGHTS = {
     "normal": 0.80,
     "warning": 0.14,
@@ -162,7 +167,11 @@ def _generate_noise(
 
     services = tuple(service_catalog.values())
     records: list[LogRecord] = []
-    total_window = NOISE_END_SECONDS - NOISE_START_SECONDS
+    noise_start_seconds = int(os.environ["GENERATOR_NOISE_START_SECONDS"])
+    noise_end_seconds = int(os.environ["GENERATOR_NOISE_END_SECONDS"])
+    if noise_end_seconds <= noise_start_seconds:
+        raise ValueError("GENERATOR_NOISE_END_SECONDS must be greater than the start value")
+    total_window = noise_end_seconds - noise_start_seconds
     for index in range(count):
         service = context.rng.choice(services)
         category = _choose_category(context.rng, service)
@@ -176,7 +185,7 @@ def _generate_noise(
         )
         position = index / (count - 1)
         jitter = context.rng.uniform(-2.0, 2.0)
-        offset = NOISE_START_SECONDS + total_window * position + jitter
+        offset = noise_start_seconds + total_window * position + jitter
         records.append(
             LogRecord(
                 schema_version=SCHEMA_VERSION,

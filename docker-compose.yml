@@ -21,7 +21,7 @@ services:
         condition: service_healthy
     environment:
       REDIS_URL: redis://redis:6379/0
-      REDIS_STREAM: ${REDIS_STREAM:-sift-logs}
+      REDIS_STREAM: ${REDIS_STREAM}
     ports:
       - "8000:8000"
     healthcheck:
@@ -37,7 +37,7 @@ services:
       retries: 10
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_DB: sift
@@ -66,15 +66,35 @@ services:
         condition: service_healthy
     environment:
       REDIS_URL: redis://redis:6379/0
-      REDIS_STREAM: ${REDIS_STREAM:-sift-logs}
-      REDIS_GROUP: ${REDIS_GROUP:-sift-log-consumers}
-      REDIS_CONSUMER: ${REDIS_CONSUMER:-consumer-1}
-      REDIS_READ_COUNT: ${REDIS_READ_COUNT:-100}
-      REDIS_BLOCK_MS: ${REDIS_BLOCK_MS:-5000}
-      REDIS_GROUP_START_ID: ${REDIS_GROUP_START_ID:-0}
+      REDIS_STREAM: ${REDIS_STREAM}
+      REDIS_GROUP: ${REDIS_GROUP}
+      REDIS_CONSUMER: ${REDIS_CONSUMER}
+      REDIS_READ_COUNT: ${REDIS_READ_COUNT}
+      REDIS_BLOCK_MS: ${REDIS_BLOCK_MS}
+      REDIS_GROUP_START_ID: ${REDIS_GROUP_START_ID}
       POSTGRES_DSN: postgresql://sift:sift@postgres:5432/sift
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_LEVEL: ${LOG_LEVEL}
+
+  log-embedder:
+    build:
+      context: .
+      dockerfile: log_embedder/Dockerfile
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql://sift:sift@postgres:5432/sift
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      CHUNK_WINDOW_SECONDS: ${CHUNK_WINDOW_SECONDS}
+      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE}
+      MAX_RECORDS_PER_CHUNK: ${MAX_RECORDS_PER_CHUNK}
+      HF_HOME: /root/.cache/huggingface
+      LOG_LEVEL: ${LOG_LEVEL}
+    volumes:
+      - model-cache:/root/.cache/huggingface
 
 volumes:
   redis-data:
   postgres-data:
+  model-cache:

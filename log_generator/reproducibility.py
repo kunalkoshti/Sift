@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
+from pathlib import Path
 import random
 
+from dotenv import load_dotenv
 
-# A seeded run must not depend on the machine's current clock.
-DETERMINISTIC_BASE_TIMESTAMP = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+ROOT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+load_dotenv(ROOT_ENV_FILE)
 
 
 @dataclass
@@ -33,7 +37,12 @@ def create_generation_context(
     """
 
     if seed is not None:
-        base_timestamp = DETERMINISTIC_BASE_TIMESTAMP
+        configured_timestamp = os.getenv("GENERATOR_BASE_TIMESTAMP")
+        if not configured_timestamp:
+            raise RuntimeError(
+                "GENERATOR_BASE_TIMESTAMP must be configured for seeded generation"
+            )
+        base_timestamp = datetime.fromisoformat(configured_timestamp)
     else:
         base_timestamp = now or datetime.now(timezone.utc)
 

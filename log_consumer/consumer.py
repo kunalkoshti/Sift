@@ -64,11 +64,11 @@ class ConsumerConfig:
             redis_url=required("REDIS_URL"),
             postgres_dsn=required("POSTGRES_DSN"),
             stream=required("REDIS_STREAM"),
-            group=os.getenv("REDIS_GROUP", "sift-log-consumers"),
-            consumer=os.getenv("REDIS_CONSUMER", "consumer-1"),
-            count=int(os.getenv("REDIS_READ_COUNT", "100")),
-            block_ms=int(os.getenv("REDIS_BLOCK_MS", "5000")),
-            group_start_id=os.getenv("REDIS_GROUP_START_ID", "0"),
+            group=required("REDIS_GROUP"),
+            consumer=required("REDIS_CONSUMER"),
+            count=int(required("REDIS_READ_COUNT")),
+            block_ms=int(required("REDIS_BLOCK_MS")),
+            group_start_id=required("REDIS_GROUP_START_ID"),
         )
 
 
