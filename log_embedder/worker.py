@@ -121,6 +121,32 @@ def group_records(
     if window_seconds <= 0:
         raise ValueError("window_seconds must be positive")
 
+    partitions: dict[str | None, list[Any]] = {}
+    for record in records:
+        partitions.setdefault(record["trace_id"], []).append(record)
+
+    groups: list[ChunkGroup] = []
+    for trace_id in sorted(
+        partitions,
+        key=lambda value: (value is not None, value or ""),
+    ):
+        groups.extend(
+            _group_partition_records(
+                partitions[trace_id],
+                window_seconds=window_seconds,
+                max_records_per_chunk=max_records_per_chunk,
+            )
+        )
+
+    return groups
+
+
+def _group_partition_records(
+    records: Sequence[Any],
+    *,
+    window_seconds: int,
+    max_records_per_chunk: int,
+) -> list[ChunkGroup]:
     windows: dict[datetime, list[Any]] = {}
     for record in records:
         start = fixed_window_start(record["timestamp"], window_seconds)
