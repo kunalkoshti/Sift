@@ -21,15 +21,30 @@ def test_groups_records_into_fixed_utc_windows_and_formats_content():
     ]
 
     groups = group_records(records, window_seconds=60, max_records_per_chunk=25)
-    chunk = prepare_chunk(groups[0])
+    chunks = [prepare_chunk(group) for group in groups]
+    noise_chunk = next(chunk for chunk in chunks if not chunk.trace_ids)
+    trace_chunk = next(chunk for chunk in chunks if chunk.trace_ids == ["trace-1"])
 
-    assert groups[0].window_start.isoformat() == "2025-12-31T23:58:00+00:00"
-    assert groups[0].sub_index == 0
-    assert chunk.content.splitlines() == [
-        "[23:58:00] INFO payment-service: message-1",
-        "[23:58:30] INFO payment-service: message-2",
+    assert trace_chunk.window_start.isoformat() == "2025-12-31T23:58:00+00:00"
+    assert trace_chunk.sub_index == 0
+    assert noise_chunk.content == "[23:58:00] INFO payment-service: message-1"
+    assert trace_chunk.content == "[23:58:30] INFO payment-service: message-2"
+
+
+def test_partitioning_prevents_mixed_trace_ids_in_chunks():
+    records = [
+        _record(1, "2025-12-31T23:58:01", "trace-a"),
+        _record(2, "2025-12-31T23:58:02", "trace-b"),
+        _record(3, "2025-12-31T23:58:03"),
     ]
-    assert chunk.trace_ids == ["trace-1"]
+
+    chunks = [
+        prepare_chunk(group)
+        for group in group_records(records, window_seconds=60, max_records_per_chunk=25)
+    ]
+
+    assert [chunk.trace_ids for chunk in chunks] == [[], ["trace-a"], ["trace-b"]]
+    assert all(len(chunk.trace_ids) <= 1 for chunk in chunks)
 
 
 def test_overflow_is_split_in_timestamp_and_id_order():
