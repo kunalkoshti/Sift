@@ -1,0 +1,133 @@
+[
+  {
+    "id": "payment-root-cause",
+    "question": "What is the chronological root cause of the payment failures? Identify the initiating event, intermediate failures, and final customer-visible symptom. Ignore unrelated noise.",
+    "category": "root-cause",
+    "scenario_id": "payment-timeout-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "payment-vague-cause",
+    "question": "Why did payments fail?",
+    "category": "root-cause",
+    "scenario_id": "payment-timeout-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "checkout-crash-loop",
+    "question": "What caused checkout to enter a crash loop and return 502 errors?",
+    "category": "root-cause",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "checkout-configuration-failure",
+    "question": "Was the checkout 502 incident caused by nginx or by the checkout service? Explain the evidence.",
+    "category": "root-cause",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "postgres-lock-root-cause",
+    "question": "What caused the PostgreSQL lock contention and the downstream checkout and payment failures?",
+    "category": "root-cause",
+    "scenario_id": "postgres-lock-contention-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "notification-rate-limit",
+    "question": "Why were notification messages delayed or rejected?",
+    "category": "root-cause",
+    "scenario_id": "notification-rate-limit-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "payment-sequence-variation",
+    "question": "What sequence of failures led from payment-worker instability to the authorization timeout?",
+    "category": "root-cause",
+    "scenario_id": "payment-timeout-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "checkout-readiness-variation",
+    "question": "Why did the checkout deployment fail to become ready after the configuration rollout?",
+    "category": "root-cause",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "postgres-migration-impact-variation",
+    "question": "How did the orders migration affect application requests?",
+    "category": "root-cause",
+    "scenario_id": "postgres-lock-contention-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "notification-backlog-variation",
+    "question": "What initiated the notification delivery backlog?",
+    "category": "root-cause",
+    "scenario_id": "notification-rate-limit-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "payment-vs-lock-ambiguity",
+    "question": "What caused the payment failures: the payment worker OOM and restart path, or PostgreSQL lock contention? Compare the evidence and flag if the retrieved logs do not uniquely identify one incident.",
+    "category": "ambiguous",
+    "expected_behavior": "flag_ambiguity"
+  },
+  {
+    "id": "checkout-vs-lock-ambiguity",
+    "question": "The logs show checkout and gateway failures. Were they caused by a checkout crash loop or PostgreSQL lock contention, and do the logs uniquely identify one incident?",
+    "category": "ambiguous",
+    "expected_behavior": "flag_ambiguity"
+  },
+  {
+    "id": "midnight-downstream-ambiguity",
+    "question": "Why did checkout and payment requests fail around midnight? Could this be the payment timeout incident or the PostgreSQL lock incident?",
+    "category": "ambiguous",
+    "expected_behavior": "flag_ambiguity"
+  },
+  {
+    "id": "inventory-quiet-service",
+    "question": "Are there any notable incidents involving the inventory service?",
+    "category": "unrelated-service",
+    "expected_behavior": "report_no_correlated_incident"
+  },
+  {
+    "id": "nginx-service-question",
+    "question": "Why did nginx return gateway error status 502 for checkout requests, and which upstream service was involved?",
+    "category": "cross-service-attribution",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "weather-out-of-scope",
+    "question": "What will the weather be tomorrow?",
+    "category": "out-of-scope",
+    "expected_behavior": "abstain"
+  },
+  {
+    "id": "revenue-out-of-scope",
+    "question": "What was the company's revenue last quarter?",
+    "category": "out-of-scope",
+    "expected_behavior": "abstain"
+  },
+  {
+    "id": "customer-churn-weak-similarity",
+    "question": "Which customers had payment issues most frequently last night?",
+    "category": "weak-similarity",
+    "expected_behavior": "abstain"
+  },
+  {
+    "id": "payment-failure-rate-weak-similarity",
+    "question": "What percentage of payment attempts failed last night?",
+    "category": "weak-similarity",
+    "expected_behavior": "abstain"
+  },
+  {
+    "id": "checkout-customer-impact-weak-similarity",
+    "question": "Which customer segment was most affected by the checkout failures?",
+    "category": "weak-similarity",
+    "expected_behavior": "abstain"
+  }
+]

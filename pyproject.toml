@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["log_generator*", "log_collector*", "log_consumer*", "log_embedder*", "log_api*", "sift_common*"]
+include = ["evaluation*", "log_generator*", "log_collector*", "log_consumer*", "log_embedder*", "log_api*", "sift_common*"]
 
 [project]
 name = "Sift"
@@ -51,4 +51,14 @@ log_api = [
     "python-dotenv>=1,<2",
     "sentence-transformers>=3,<6",
     "uvicorn[standard]>=0.30,<1",
+]
+evaluation = [
+    "asyncpg>=0.29,<1",
+    "httpx>=0.27,<1",
+    "langchain-community>=0.4.1,<0.4.2",
+    "numpy>=1.26,<3",
+    "openai>=1.50,<2",
+    "python-dotenv>=1,<2",
+    "ragas>=0.4,<0.5",
+    "sentence-transformers>=3,<6",
 ]

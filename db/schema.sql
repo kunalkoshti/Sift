@@ -38,3 +38,52 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_idx
 
 CREATE INDEX IF NOT EXISTS chunks_window_idx
   ON chunks (window_start, window_end);
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+  id BIGSERIAL PRIMARY KEY,
+  run_id UUID NOT NULL,
+  run_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
+  stage_name TEXT NOT NULL,
+  question_id TEXT NOT NULL,
+  question_text TEXT NOT NULL,
+  category TEXT NOT NULL,
+  generated_answer TEXT NOT NULL,
+  retrieved_chunk_ids UUID[] NOT NULL DEFAULT '{}',
+  faithfulness DOUBLE PRECISION,
+  context_precision DOUBLE PRECISION,
+  context_recall DOUBLE PRECISION,
+  answer_relevancy DOUBLE PRECISION,
+  classified_behavior TEXT NOT NULL,
+  behavior_match BOOLEAN NOT NULL,
+  latency_ms DOUBLE PRECISION NOT NULL
+);
+
+-- Existing Postgres volumes already have eval_runs, so add Phase 2 behavior
+-- classifier fields independently as an idempotent schema migration.
+ALTER TABLE eval_runs
+  ADD COLUMN IF NOT EXISTS classified_behavior TEXT;
+
+ALTER TABLE eval_runs
+  ADD COLUMN IF NOT EXISTS behavior_match BOOLEAN;
+
+-- The first Phase 2 draft used abstention_correct. Preserve any historical
+-- values, but allow new classifier-based inserts to omit that legacy column.
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'eval_runs'
+      AND column_name = 'abstention_correct'
+  ) THEN
+    ALTER TABLE eval_runs
+      ALTER COLUMN abstention_correct DROP NOT NULL;
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS eval_runs_run_idx
+  ON eval_runs (run_id);
+
+CREATE INDEX IF NOT EXISTS eval_runs_stage_question_idx
+  ON eval_runs (stage_name, question_id);
