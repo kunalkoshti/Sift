@@ -55,6 +55,7 @@ def build_llm(
             api_key=groq_api_key,
             base_url=groq_base_url,
             temperature=0,
+            reasoning_effort="low",
         )
 
     raise RuntimeError(

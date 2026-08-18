@@ -1,0 +1,15 @@
+[
+  {
+    "id": "checkout-configuration-failure",
+    "question": "Was the checkout 502 incident caused by nginx or by the checkout service? Explain the evidence.",
+    "category": "root-cause",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence"
+  },
+  {
+    "id": "checkout-vs-lock-ambiguity",
+    "question": "The logs show checkout and gateway failures. Were they caused by a checkout crash loop or PostgreSQL lock contention, and do the logs uniquely identify one incident?",
+    "category": "ambiguous",
+    "expected_behavior": "flag_ambiguity"
+  }
+]
