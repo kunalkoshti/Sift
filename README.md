@@ -98,9 +98,9 @@ The harness evaluates 20 questions covering root cause, ambiguity, unrelated ser
 
 Context precision and recall are calculated for the 11 questions with reference answers. The other 9 values are intentionally `NULL`.
 
-### Dense versus hybrid retrieval
+### Dense versus hybrid retrieval + reranking
 
-| Metric | Stage 1: Dense | Stage 2: Hybrid | Change |
+| Metric | Stage 1: Dense | Stage 2: Hybrid + reranking | Change |
 |---|---:|---:|---:|
 | Faithfulness | 0.809 | 0.759 | -0.050 |
 | Answer relevancy | 0.843 | 0.860 | +0.017 |
