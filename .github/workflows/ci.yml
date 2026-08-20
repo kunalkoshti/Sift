@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,log_generator,log_collector,log_consumer,log_api]"
+
+      - name: Create CI environment file
+        run: cp .env.example .env
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config --quiet
+
+      - name: Run tests
+        run: >-
+          python -m pytest
+          evaluation
+          log_collector
+          log_consumer
+          log_embedder
+          log_generator
+          log_api
+          -q

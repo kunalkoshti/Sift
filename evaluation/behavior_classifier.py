@@ -10,6 +10,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from evaluation.provider import EvaluationLLMConfig
+
 
 VALID_BEHAVIORS = frozenset(
     {
@@ -72,20 +74,14 @@ async def classify_behavior(
     *,
     question: str,
     answer: str,
-    provider: str,
-    model_name: str,
-    ollama_base_url: str,
-    groq_base_url: str,
-    groq_api_key: str | None,
+    config: EvaluationLLMConfig,
+    model_name: str | None = None,
 ) -> BehaviorClassification:
     """Make one forced single-label classification call, separate from RAGAS."""
 
     classifier = BehaviorClassifier(
-        provider=provider,
+        config=config,
         model_name=model_name,
-        ollama_base_url=ollama_base_url,
-        groq_base_url=groq_base_url,
-        groq_api_key=groq_api_key,
     )
     try:
         return await classifier.classify(question, answer)
@@ -99,27 +95,12 @@ class BehaviorClassifier:
     def __init__(
         self,
         *,
-        provider: str,
-        model_name: str,
-        ollama_base_url: str,
-        groq_base_url: str,
-        groq_api_key: str | None,
+        config: EvaluationLLMConfig,
+        model_name: str | None = None,
     ):
-        from openai import AsyncOpenAI
-
-        self.provider = provider
-        self.model_name = model_name
-        if provider == "groq":
-            if not groq_api_key:
-                raise RuntimeError("GROQ_API_KEY is required for behavior classification")
-            self.client = AsyncOpenAI(api_key=groq_api_key, base_url=groq_base_url)
-        elif provider == "ollama":
-            self.client = AsyncOpenAI(
-                api_key="ollama",
-                base_url=f"{ollama_base_url.rstrip('/')}/v1",
-            )
-        else:
-            raise RuntimeError(f"unsupported behavior-classifier provider: {provider!r}")
+        self.config = config
+        self.model_name = model_name or config.model
+        self.client = config.build_client()
 
     async def classify(self, question: str, answer: str) -> BehaviorClassification:
         """Classify one question/answer pair with a deterministic single-label prompt."""
@@ -128,7 +109,7 @@ class BehaviorClassifier:
             model=self.model_name,
             temperature=0,
             max_tokens=64,
-            reasoning_effort="low",
+            **self.config.request_options(),
             messages=[
                 {"role": "system", "content": CLASSIFIER_SYSTEM_PROMPT},
                 {
@@ -158,11 +139,11 @@ async def main() -> None:
     result = await classify_behavior(
         question=args.question,
         answer=args.answer,
-        provider=os.getenv("LLM_PROVIDER", "groq").lower(),
-        model_name=os.getenv("BEHAVIOR_CLASSIFIER_MODEL") or os.getenv("LLM_MODEL", "openai/gpt-oss-20b"),
-        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-        groq_api_key=os.getenv("GROQ_API_KEY"),
+        config=EvaluationLLMConfig.from_env(),
+        model_name=(
+            os.getenv("EVAL_CLASSIFIER_MODEL")
+            or os.getenv("BEHAVIOR_CLASSIFIER_MODEL")
+        ),
     )
     print(f"raw_output={result.stored_value!r}")
     print(f"parsed_label={result.label!r}")

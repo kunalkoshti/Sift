@@ -1,7 +1,8 @@
+import asyncio
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi.testclient import TestClient
+import httpx
 
 from log_api.app import create_app
 from log_api.retriever import RetrievedChunk
@@ -28,9 +29,22 @@ class FakeRAGService:
 
 
 def test_health_and_ask_endpoint():
-    with TestClient(create_app(FakeRAGService())) as client:
-        assert client.get("/health").json() == {"status": "ok"}
-        response = client.post("/ask", json={"question": "why did payments fail"})
+    async def exercise() -> httpx.Response:
+        app = create_app(FakeRAGService())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                health = await client.get("/health")
+                assert health.json() == {"status": "ok"}
+                return await client.post(
+                    "/ask",
+                    json={"question": "why did payments fail"},
+                )
+
+    response = asyncio.run(exercise())
 
     assert response.status_code == 200
     body = response.json()
@@ -40,7 +54,16 @@ def test_health_and_ask_endpoint():
 
 
 def test_blank_question_is_rejected():
-    with TestClient(create_app(FakeRAGService())) as client:
-        response = client.post("/ask", json={"question": "   "})
+    async def exercise() -> httpx.Response:
+        app = create_app(FakeRAGService())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.post("/ask", json={"question": "   "})
+
+    response = asyncio.run(exercise())
 
     assert response.status_code == 422
