@@ -7,6 +7,8 @@ from functools import lru_cache
 import os
 from typing import Any
 
+from evaluation.provider import EvaluationLLMConfig
+
 try:
     from ragas.embeddings.base import BaseRagasEmbedding
 except ImportError:  # Keep question/abstention checks importable without eval extras.
@@ -64,40 +66,25 @@ class SentenceTransformerRagasEmbeddings(BaseRagasEmbedding):
 
 @lru_cache(maxsize=1)
 def build_ragas_components(
-    provider: str,
-    model_name: str,
+    config: EvaluationLLMConfig,
     embedding_model: str,
-    ollama_base_url: str,
-    groq_base_url: str,
-    groq_api_key: str | None,
 ) -> tuple[Any, Any]:
-    """Build the evaluator LLM and embeddings once per harness process."""
+    """Build the configured evaluator LLM and local embeddings once per process."""
 
     from ragas.llms import llm_factory
 
-    if provider == "groq":
-        from openai import AsyncOpenAI
-
-        if not groq_api_key:
-            raise RuntimeError("GROQ_API_KEY is required for RAGAS with Groq")
-        client = AsyncOpenAI(api_key=groq_api_key, base_url=groq_base_url)
-    elif provider == "ollama":
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(
-            api_key="ollama",
-            base_url=f"{ollama_base_url.rstrip('/')}/v1",
-        )
-    else:
-        raise RuntimeError(f"unsupported evaluator provider: {provider!r}")
+    client = config.build_client()
 
     ragas_max_tokens = int(os.getenv("RAGAS_MAX_TOKENS", "2048"))
+    llm_options: dict[str, Any] = {
+        "client": client,
+        "temperature": 0,
+        "max_tokens": ragas_max_tokens,
+    }
+    llm_options.update(config.request_options())
     llm = llm_factory(
-        model_name,
-        client=client,
-        temperature=0,
-        max_tokens=ragas_max_tokens,
-        reasoning_effort="low",
+        config.model,
+        **llm_options,
     )
     embeddings = SentenceTransformerRagasEmbeddings(embedding_model)
     return llm, embeddings
@@ -109,12 +96,8 @@ async def score_ragas(
     answer: str,
     contexts: list[str],
     reference: str | None,
-    provider: str,
-    model_name: str,
+    config: EvaluationLLMConfig,
     embedding_model: str,
-    ollama_base_url: str,
-    groq_base_url: str,
-    groq_api_key: str | None,
     metric_delay_seconds: float = 0.0,
 ) -> dict[str, float | None]:
     """Score one answer. Reference-dependent metrics remain null without a reference."""
@@ -122,12 +105,8 @@ async def score_ragas(
     from ragas.metrics.collections import AnswerRelevancy, Faithfulness
 
     llm, embeddings = build_ragas_components(
-        provider,
-        model_name,
+        config,
         embedding_model,
-        ollama_base_url,
-        groq_base_url,
-        groq_api_key,
     )
     scores: dict[str, float | None] = {
         "faithfulness": None,

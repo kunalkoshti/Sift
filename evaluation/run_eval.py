@@ -21,6 +21,7 @@ import httpx
 from dotenv import load_dotenv
 
 from evaluation.behavior_classifier import BehaviorClassifier, behavior_matches
+from evaluation.provider import EvaluationLLMConfig
 from evaluation.ragas_metrics import score_ragas
 from log_generator.scenarios import SCENARIOS
 
@@ -140,21 +141,18 @@ async def run() -> None:
     run_timestamp = datetime.now(timezone.utc)
     rows: list[dict[str, Any]] = []
 
-    provider = os.getenv("LLM_PROVIDER", "groq").lower()
-    llm_model = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
-    classifier_model = os.getenv("BEHAVIOR_CLASSIFIER_MODEL") or llm_model
+    eval_config = EvaluationLLMConfig.from_env()
+    classifier_model = (
+        os.getenv("EVAL_CLASSIFIER_MODEL")
+        or os.getenv("BEHAVIOR_CLASSIFIER_MODEL")
+        or eval_config.model
+    )
     embedding_model = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     postgres_dsn = os.environ["POSTGRES_DSN"]
-    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
-    groq_api_key = os.getenv("GROQ_API_KEY")
 
     classifier = BehaviorClassifier(
-        provider=provider,
+        config=eval_config,
         model_name=classifier_model,
-        ollama_base_url=ollama_base_url,
-        groq_base_url=groq_base_url,
-        groq_api_key=groq_api_key,
     )
     try:
         async with httpx.AsyncClient(timeout=120) as client:
@@ -188,12 +186,8 @@ async def run() -> None:
                         answer=answer,
                         contexts=contexts,
                         reference=reference,
-                        provider=provider,
-                        model_name=llm_model,
+                        config=eval_config,
                         embedding_model=embedding_model,
-                        ollama_base_url=ollama_base_url,
-                        groq_base_url=groq_base_url,
-                        groq_api_key=groq_api_key,
                         metric_delay_seconds=args.metric_delay_seconds,
                     )
 

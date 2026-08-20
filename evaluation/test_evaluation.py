@@ -5,6 +5,7 @@ from evaluation.behavior_classifier import (
     behavior_matches,
     parse_classification,
 )
+from evaluation.provider import EvaluationLLMConfig
 
 
 def test_question_file_is_structured_and_covers_all_scenarios():
@@ -37,3 +38,18 @@ def test_behavior_classifier_output_must_be_one_known_label():
     assert invalid.label is None
     assert behavior_matches("abstain", abstain)
     assert not behavior_matches("abstain", invalid)
+
+
+def test_evaluation_model_is_configurable_for_cerebras(monkeypatch):
+    monkeypatch.setenv("EVAL_PROVIDER", "cerebras")
+    monkeypatch.setenv("EVAL_MODEL", "gemma-4-31b")
+    monkeypatch.setenv("EVAL_BASE_URL", "https://api.cerebras.ai/v1")
+    monkeypatch.setenv("EVAL_API_KEY", "test-key")
+    monkeypatch.delenv("EVAL_REASONING_EFFORT", raising=False)
+
+    config = EvaluationLLMConfig.from_env()
+
+    assert config.provider == "cerebras"
+    assert config.model == "gemma-4-31b"
+    assert config.base_url == "https://api.cerebras.ai/v1"
+    assert config.request_options() == {}

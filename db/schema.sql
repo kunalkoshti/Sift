@@ -58,16 +58,17 @@ CREATE TABLE IF NOT EXISTS eval_runs (
   latency_ms DOUBLE PRECISION NOT NULL
 );
 
--- Existing Postgres volumes already have eval_runs, so add Phase 2 behavior
--- classifier fields independently as an idempotent schema migration.
+-- Existing Postgres volumes already have eval_runs, so add behavior-classifier
+-- fields independently as an idempotent schema migration.
 ALTER TABLE eval_runs
   ADD COLUMN IF NOT EXISTS classified_behavior TEXT;
 
 ALTER TABLE eval_runs
   ADD COLUMN IF NOT EXISTS behavior_match BOOLEAN;
 
--- The first Phase 2 draft used abstention_correct. Preserve any historical
+-- The first evaluation draft used abstention_correct. Preserve any historical
 -- values, but allow new classifier-based inserts to omit that legacy column.
+
 DO $$
 BEGIN
   IF EXISTS (
