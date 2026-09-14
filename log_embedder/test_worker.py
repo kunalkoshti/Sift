@@ -1,6 +1,11 @@
 from datetime import datetime, timezone
 
-from log_embedder.worker import format_content, group_records, prepare_chunk
+from log_embedder.worker import (
+    collect_max_level,
+    format_content,
+    group_records,
+    prepare_chunk,
+)
 
 
 def _record(record_id: int, timestamp: str, trace_id: str | None = None) -> dict:
@@ -29,6 +34,18 @@ def test_groups_records_into_fixed_utc_windows_and_formats_content():
     assert trace_chunk.sub_index == 0
     assert noise_chunk.content == "[23:58:00] INFO payment-service: message-1"
     assert trace_chunk.content == "[23:58:30] INFO payment-service: message-2"
+    assert noise_chunk.max_level == "INFO"
+    assert trace_chunk.max_level == "INFO"
+
+
+def test_collect_max_level_uses_severity_order():
+    records = [
+        {"level": "WARN"},
+        {"level": "CRITICAL"},
+        {"level": "ERROR"},
+    ]
+
+    assert collect_max_level(records) == "CRITICAL"
 
 
 def test_partitioning_prevents_mixed_trace_ids_in_chunks():

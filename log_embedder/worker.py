@@ -35,6 +35,7 @@ INSERT INTO chunks (
   sub_index,
   services,
   trace_ids,
+  max_level,
   content,
   embedding,
   raw_log_ids
@@ -46,8 +47,9 @@ INSERT INTO chunks (
   $5::text[],
   $6::text[],
   $7,
-  $8::vector,
-  $9::bigint[]
+  $8,
+  $9::vector,
+  $10::bigint[]
 )
 """
 
@@ -93,6 +95,7 @@ class PreparedChunk:
     sub_index: int
     services: list[str]
     trace_ids: list[str]
+    max_level: str
     content: str
     raw_log_ids: list[int]
 
@@ -193,6 +196,25 @@ def collect_trace_ids(records: Iterable[Any]) -> list[str]:
     return sorted({value for value in values if value is not None})
 
 
+LEVEL_RANK = {
+    "DEBUG": 0,
+    "INFO": 1,
+    "WARN": 2,
+    "ERROR": 3,
+    "CRITICAL": 4,
+}
+
+
+def collect_max_level(records: Iterable[Any]) -> str:
+    levels = [str(record["level"]).upper() for record in records]
+    if not levels:
+        raise ValueError("a chunk must contain at least one log record")
+    unknown = [level for level in levels if level not in LEVEL_RANK]
+    if unknown:
+        raise ValueError(f"unknown log level(s): {', '.join(sorted(set(unknown)))}")
+    return max(levels, key=LEVEL_RANK.__getitem__)
+
+
 def prepare_chunk(group: ChunkGroup) -> PreparedChunk:
     records = group.records
     return PreparedChunk(
@@ -202,6 +224,7 @@ def prepare_chunk(group: ChunkGroup) -> PreparedChunk:
         sub_index=group.sub_index,
         services=sorted({record["service"] for record in records}),
         trace_ids=collect_trace_ids(records),
+        max_level=collect_max_level(records),
         content=format_content(records),
         raw_log_ids=[record["id"] for record in records],
     )
@@ -284,6 +307,7 @@ async def replace_chunks(
                             chunk.sub_index,
                             chunk.services,
                             chunk.trace_ids,
+                            chunk.max_level,
                             chunk.content,
                             embedding,
                             chunk.raw_log_ids,

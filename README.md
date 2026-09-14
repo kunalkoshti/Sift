@@ -1,67 +1,107 @@
 # Sift
 
-Sift is a log-ingestion and RAG system for investigating application incidents from structured logs.
+Sift is a structured-log ingestion and RAG system for investigating application incidents.
 
-> **Status:** actively under development. The batch pipeline works end to end; live incremental embedding and additional production hardening remain future work.
+> **Status:** actively under development. The batch pipeline works end to end. Live incremental embedding and production hardening are not implemented yet.
 
 ## Architecture
 
-```text
-log_generator → log_collector → Redis → log_consumer → Postgres
-                                                        │
-                                           log_embedder → chunks
-                                                        │
-                                           log_api → Groq/Ollama
-```
+~~~text
+log_generator -> log_collector -> Redis -> log_consumer -> PostgreSQL.raw_logs
+                                                               |
+                                                log_embedder -> PostgreSQL.chunks
+                                                               |
+                                                   log_api -> LLM answer
 
-- `log_generator` creates seeded noise and incident scenarios.
-- `log_collector` validates records and writes them to Redis.
-- `log_consumer` stores records in Postgres `raw_logs`.
-- `log_embedder` creates and embeds derived chunks.
-- `log_api` performs retrieval and answers questions through `POST /ask`.
-- `evaluation` runs RAGAS and behavior checks against the QA API.
+evaluation -> log_api /ask -> RAGAS + behavior checks -> PostgreSQL.eval_runs
+~~~
 
-## Design
+log_api reads the chunks table directly; it does not receive records from log_embedder at runtime.
 
-Records are partitioned by `trace_id`; records without a trace ID form the noise partition. Each partition is grouped into fixed 60-second UTC windows and capped at 25 records. Oversized windows are split chronologically. Chunk content uses one newline-separated log per record:
+Services:
 
-```text
+- log_generator creates seeded background noise and scripted incidents.
+- log_collector validates single records or batches and writes them to Redis.
+- log_consumer persists deduplicated records in raw_logs.
+- log_embedder builds time-windowed chunks and embeddings.
+- log_api retrieves evidence and answers questions through POST /ask.
+- evaluation measures answer, retrieval, and behavior quality.
+
+## Core design
+
+Logs follow one contract:
+
+~~~text
+schema_version, timestamp, level, service, host, message, trace_id, metadata
+~~~
+
+Records are partitioned by trace ID before chunking. Each non-null trace ID forms an incident partition; null trace IDs form the background-noise partition. Each partition is grouped into fixed 60-second UTC windows and capped at 25 records. Oversized windows are split chronologically using sub_index.
+
+Chunk content contains one newline-separated record per line:
+
+~~~text
 [HH:MM:SS] LEVEL service: message
-```
+~~~
 
-Chunks use normalized `BAAI/bge-small-en-v1.5` embeddings with 384 dimensions.
+Newlines preserve event boundaries. Trace IDs and raw log IDs remain in database columns for exact traceability rather than being included in embedded prose.
 
-The API supports:
+Embeddings use normalized BAAI/bge-small-en-v1.5 vectors with 384 dimensions. Chunks are stored in PostgreSQL with pgvector and a generated PostgreSQL full-text index.
 
-- Dense pgvector cosine retrieval.
-- PostgreSQL full-text retrieval using `tsvector`.
-- Weighted reciprocal rank fusion. Defaults: `RRF_K=60`, dense weight `1.0`, lexical weight `1.0`.
-- Cross-encoder reranking with `cross-encoder/ms-marco-MiniLM-L-6-v2`.
-- Chronological expansion of the top result's trace when it has a trace ID.
+## Retrieval
 
-Close-similarity ties between unrelated incidents are not fully resolved yet.
+The default mode is hybrid:
+
+1. Parse supported service and time expressions.
+2. Apply service/time filters to the initial SQL search.
+3. Run dense pgvector search and PostgreSQL full-text search.
+4. Fuse results with weighted reciprocal rank fusion.
+5. Rerank candidates with cross-encoder/ms-marco-MiniLM-L-6-v2.
+6. Discover trace IDs from the larger candidate pool.
+7. Expand selected traces without the initial service/time boundaries.
+8. Sort context chronologically and send it to the LLM.
+
+Default retrieval settings:
+
+~~~text
+RETRIEVAL_TOP_K=5
+TRACE_CANDIDATE_K=40
+RRF_K=60
+DENSE_RRF_WEIGHT=1.0
+LEXICAL_RRF_WEIGHT=1.0
+MAX_TRACE_CHUNKS=50
+~~~
+
+The RRF weights are score contributions, not percentages.
+
+Severity is still stored and shown in context, but it is not used as a hard retrieval filter. Hard severity filtering previously removed causal precursor events.
+
+Unknown services, unsupported time expressions, and empty retrievals are handled deterministically. If multiple incident traces have similarly strong scores, the API expands them separately and adds an ambiguity note.
 
 ## Setup
 
-Create local configuration and install dependencies:
+Create local configuration:
 
-```bash
+~~~bash
 cp .env.example .env
-# Set GROQ_API_KEY and EVAL_API_KEY in .env
+# Set GROQ_API_KEY and EVAL_API_KEY in .env as required.
+~~~
 
+Install the project and development dependencies:
+
+~~~bash
 python3 -m venv log_generator/.venv
 log_generator/.venv/bin/pip install -e '.[dev,log_generator,log_collector,log_consumer,log_embedder,log_api,evaluation]'
-```
+~~~
 
-Start ingestion services:
+Start the ingestion services:
 
-```bash
+~~~bash
 docker compose up -d redis postgres log-collector log-consumer
-```
+~~~
 
-Generate and send logs:
+Generate and send an incident corpus:
 
-```bash
+~~~bash
 log_generator/.venv/bin/python log_generator/send_to_collector.py \
   --collector-url http://localhost:8000 \
   --scenario payment-timeout-v1 \
@@ -70,66 +110,121 @@ log_generator/.venv/bin/python log_generator/send_to_collector.py \
   --batch-size 50 \
   --output data/logs/payment-timeout-v1.jsonl \
   --ground-truth data/ground_truth/payment-timeout-v1.json
-```
+~~~
 
-Build chunks and start the API:
+Rebuild chunks and start the API:
 
-```bash
+~~~bash
 docker compose run --rm --build log-embedder
 docker compose up -d --build log-api
-```
+~~~
 
-Query the API:
+Check health and ask a question:
 
-```bash
-curl -X POST http://localhost:8001/ask \
+~~~bash
+curl -s http://localhost:8001/health | jq
+
+curl -s -X POST http://localhost:8001/ask \
   -H 'Content-Type: application/json' \
-  -d '{"question":"What caused the payment failures?"}'
-```
+  -d '{"question":"What caused the payment failures?"}' | jq
+~~~
+
+Ollama is optional and runs only with the local-llm Compose profile. Remote providers can be used to avoid loading a local generation model into device memory.
 
 ## Evaluation
 
-The harness evaluates 20 questions covering root cause, ambiguity, unrelated services, out-of-scope questions, and weak similarity. It records the answer, retrieved chunks, latency, behavior classification, and these RAGAS metrics:
+The current filter-retrieval evaluation uses the frozen 32-question file:
 
-- Faithfulness
-- Answer relevancy
-- Context precision
-- Context recall
+~~~text
+evaluation/questions_stage4.json
+~~~
 
-Context precision and recall are calculated for the 11 questions with reference answers. The other 9 values are intentionally `NULL`.
+Questions cover root cause, alternate phrasing, ambiguity, unrelated services, out-of-scope requests, weak similarity, service/time filtering, multi-service retrieval, unknown services, unsupported time expressions, and no-result behavior.
 
-### Dense versus hybrid retrieval + reranking
+The harness stores one row per question in eval_runs and records:
 
-| Metric | Stage 1: Dense | Stage 2: Hybrid + reranking | Change |
-|---|---:|---:|---:|
-| Faithfulness | 0.809 | 0.759 | -0.050 |
-| Answer relevancy | 0.843 | 0.860 | +0.017 |
-| Context precision | 0.705 | 0.788 | +0.083 |
-| Context recall | 0.818 | 0.909 | +0.091 |
-| Behavior match | 80.0% | 85.0% | +5.0 pp |
-| Average latency | 839 ms | 2,352 ms | +1,513 ms |
+- generated answer;
+- retrieved chunk IDs;
+- latency;
+- faithfulness;
+- answer relevancy;
+- context precision;
+- context recall;
+- classified behavior;
+- behavior match;
+- classifier failure state.
 
-Hybrid retrieval improved precision, recall, answer relevancy, and behavior matching because lexical search captures exact log terms while dense search captures semantic matches; RRF and cross-encoder reranking then prioritize stronger candidates. Faithfulness declined slightly because more relevant context can still contain multiple plausible incidents, and the answer model may combine evidence or overstate a causal chain. Latency increased as expected because hybrid retrieval adds a second database search, fusion, and cross-encoder inference.
+Context precision and recall are skipped when there is no reference answer or no retrieved context. The last-week-no-results fallback question is excluded from aggregate context precision/recall reporting because its result depends on the fallback retrieval note rather than ordinary in-range retrieval.
 
-Run the evaluation with the configured Cerebras evaluator:
+Run the current evaluation with the provider configured in .env:
 
-```bash
+~~~bash
 RAGAS_MAX_TOKENS=4096 \
 log_generator/.venv/bin/python -m evaluation.run_eval \
   --api-url http://localhost:8001 \
-  --questions evaluation/questions.json \
-  --stage stage_2_hybrid_cerebras_gpt_oss \
-  --delay-seconds 120 \
-  --metric-delay-seconds 120
-```
+  --questions evaluation/questions_stage4.json \
+  --stage stage_4_filter_coverage_32_final \
+  --delay-seconds 60 \
+  --metric-delay-seconds 60
+~~~
 
-The evaluator uses `EVAL_*` settings independently from the model used by `/ask`. The evaluation database table is `eval_runs`.
+Use a new stage name for every distinct run. Compare results only when the question file, data corpus, model configuration, and scoring policy are the same.
+
+## Latest recorded evaluation
+
+The final 32-question filter evaluation stored all 32 rows.
+
+Reportable aggregate results:
+
+| Metric | Result | Valid values |
+|---|---:|---:|
+| Faithfulness | 0.7361 | 29/32 |
+| Answer relevancy | 0.7467 | 32/32 |
+| Context precision | 0.8182 | 18/18 |
+| Context recall | 0.9167 | 18/18 |
+| Behavior match | 90.63% | 29/32 |
+
+The run had no provider rate-limit failures and no classifier failures. Three faithfulness values were intentionally unavailable because those questions retrieved no chunks.
+
+Three ambiguity questions were classified as answer_with_evidence instead of flag_ambiguity:
+
+- midnight-downstream-ambiguity
+- payment-vs-lock-ambiguity
+- postgres-causal-expansion
+
+The scores indicate strong retrieval coverage on the reportable reference-backed questions, but answer grounding and ambiguity handling still need improvement.
+
+Earlier evaluation tables are intentionally not included here because they used different question sets and are not directly comparable.
 
 ## Tests
 
-```bash
+~~~bash
 log_generator/.venv/bin/python -m pytest \
   evaluation log_collector log_consumer log_embedder log_generator log_api -q
-```
 
-Known limitations are close-similarity ambiguity, rebuild-only embedding, and provider rate limits during long evaluations.
+docker compose config --quiet
+~~~
+
+## Known limitations
+
+- Broad service-only queries can select one relevant trace while missing another related trace.
+- Broad temporal queries can include background noise and only partial incident coverage.
+- Similar incidents are not always disambiguated correctly.
+- When three or more traces are found, only the top two are expanded.
+- Trace expansion is capped to protect context size.
+- Severity is stored but not an exact retrieval filter.
+- Embeddings are rebuilt in batch rather than updated continuously.
+- External LLM provider limits can interrupt evaluation metrics.
+- The Docker Compose setup is for local development, not high availability.
+- Authentication, authorization, multi-tenancy, alerting, and production scaling are not implemented.
+
+## Future work
+
+Potential next improvements are:
+
+- improve multi-trace selection for broad service queries;
+- improve temporal retrieval coverage while controlling noise;
+- add query expansion or HyDE and evaluate each independently;
+- add bounded retries and explicit error storage for evaluation metrics;
+- replace truncate-and-rebuild embedding with incremental processing;
+- add operational metrics, authentication, retention, and deployment hardening.
