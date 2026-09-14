@@ -18,14 +18,16 @@
     "question": "What caused checkout to enter a crash loop and return 502 errors?",
     "category": "root-cause",
     "scenario_id": "checkout-502-v1",
-    "expected_behavior": "answer_with_evidence"
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "Checkout-service configuration validation failed during startup. Its readiness probe then failed after the configuration rollout, and the service entered a crash loop after three restart attempts. Nginx later recorded the upstream timeout and returned a 502, which was the downstream symptom."
   },
   {
     "id": "checkout-configuration-failure",
     "question": "Was the checkout 502 incident caused by nginx or by the checkout service? Explain the evidence.",
     "category": "root-cause",
     "scenario_id": "checkout-502-v1",
-    "expected_behavior": "answer_with_evidence"
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "The evidence points to checkout-service as the initiating failure: configuration validation failed, the readiness probe failed after the rollout, and checkout entered a crash loop. Nginx recorded the delayed upstream response and returned 502 as the customer-visible downstream symptom."
   },
   {
     "id": "postgres-lock-root-cause",
@@ -53,7 +55,8 @@
     "question": "Why did the checkout deployment fail to become ready after the configuration rollout?",
     "category": "root-cause",
     "scenario_id": "checkout-502-v1",
-    "expected_behavior": "answer_with_evidence"
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "The checkout deployment failed to become ready because configuration validation failed during startup. The readiness probe then failed after the configuration rollout, and checkout subsequently entered a crash loop after three restart attempts."
   },
   {
     "id": "postgres-migration-impact-variation",
@@ -134,6 +137,7 @@
     "id": "midnight-temporal-filter",
     "question": "What happened around midnight?",
     "category": "temporal",
+    "filter_case": "temporal_only",
     "expected_behavior": "answer_with_evidence",
     "reference_answer": "Around midnight, the logs show several concurrent incident events, including payment authorization timeout, checkout impact, PostgreSQL lock-related failures, and downstream gateway errors. The events should be reported in timestamp order rather than treated as one proven root cause."
   },
@@ -141,6 +145,7 @@
     "id": "critical-errors-last-night",
     "question": "Were there any critical errors last night?",
     "category": "temporal",
+    "filter_case": "temporal_and_topic_semantic",
     "expected_behavior": "answer_with_evidence",
     "reference_answer": "Yes. Critical events included the payment worker OOM and restart path, checkout configuration and crash-loop failures, and the PostgreSQL orders-lock event."
   },
@@ -148,14 +153,79 @@
     "id": "postgres-errors-filter",
     "question": "What was postgres doing?",
     "category": "service-filter",
+    "filter_case": "service_only",
     "expected_behavior": "answer_with_evidence",
     "reference_answer": "Postgres activity included connection pool exhaustion for payment-service and lock-related query failures during the orders migration."
   },
   {
     "id": "payment-critical-alerts-filter",
     "question": "Were there any critical alerts from the payment service?",
-    "category": "service-severity-filter",
+    "category": "service-semantic-query",
+    "filter_case": "service_only_semantic",
     "expected_behavior": "answer_with_evidence",
     "reference_answer": "Yes. The payment service was killed by OOM, auto-restarted, and then failed its readiness probe."
+  },
+  {
+    "id": "postgres-causal-expansion",
+    "question": "Why did postgres-related requests fail last night?",
+    "category": "service-temporal-filter",
+    "filter_case": "service_and_time_with_trace_expansion",
+    "expected_behavior": "flag_ambiguity"
+  },
+  {
+    "id": "payment-critical-last-night",
+    "question": "What critical alerts came from payment-service last night?",
+    "category": "service-temporal-semantic-query",
+    "filter_case": "service_and_time_semantic",
+    "scenario_id": "payment-timeout-v1",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "The payment service emitted critical events last night when the worker was killed by OOM, auto-restarted, and then failed its readiness probe."
+  },
+  {
+    "id": "inventory-no-incident-last-night",
+    "question": "Did inventory-service have any correlated incidents last night?",
+    "category": "service-temporal-filter",
+    "filter_case": "service_and_time_noise_only",
+    "expected_behavior": "report_no_correlated_incident"
+  },
+  {
+    "id": "notification-error-filter",
+    "question": "What errors were reported by notification-service?",
+    "category": "service-semantic-query",
+    "filter_case": "service_only_semantic",
+    "scenario_id": "notification-rate-limit-v1",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "Notification-service reported failed delivery and provider rejection errors caused by HTTP 429 rate limiting."
+  },
+  {
+    "id": "multi-service-checkout-filter",
+    "question": "What happened in nginx and checkout-service during the 502 incident?",
+    "category": "multi-service-filter",
+    "filter_case": "multiple_services",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "Checkout-service failed configuration validation, readiness, and restart checks. Nginx then recorded an upstream timeout and returned 502 for the checkout request."
+  },
+  {
+    "id": "last-week-no-results",
+    "question": "What happened in the logs last week?",
+    "category": "temporal-no-results",
+    "filter_case": "temporal_only_empty_window",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "No logs were found in the requested last-week window. The system may fall back to the available corpus, but it must clearly state that the retrieved evidence is outside the requested time range."
+  },
+  {
+    "id": "unknown-service-filter",
+    "question": "Did kafka have any incidents?",
+    "category": "unknown-service",
+    "filter_case": "unrecognized_service",
+    "expected_behavior": "abstain"
+  },
+  {
+    "id": "unsupported-relative-time",
+    "question": "What happened in the logs two hours ago?",
+    "category": "unsupported-temporal",
+    "filter_case": "unsupported_time_expression",
+    "expected_behavior": "abstain"
   }
 ]

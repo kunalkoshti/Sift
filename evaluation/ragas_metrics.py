@@ -64,6 +64,15 @@ class SentenceTransformerRagasEmbeddings(BaseRagasEmbedding):
     aembed_documents = aembed_texts
 
 
+def should_score_context_metrics(
+    reference: str | None,
+    contexts: list[str],
+) -> bool:
+    """Return whether reference-based retrieval metrics have valid inputs."""
+
+    return bool(reference and contexts)
+
+
 @lru_cache(maxsize=1)
 def build_ragas_components(
     config: EvaluationLLMConfig,
@@ -144,7 +153,10 @@ async def score_ragas(
         response=answer,
     )
 
-    if reference:
+    # RAGAS requires retrieved_contexts for both context metrics. Empty
+    # retrievals are valid behavior for abstention tests, but they cannot
+    # produce a meaningful precision/recall score.
+    if should_score_context_metrics(reference, contexts):
         from ragas.metrics.collections import ContextPrecision, ContextRecall
 
         await run_metric(

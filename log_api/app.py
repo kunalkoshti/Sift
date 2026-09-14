@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from log_api.qa import QAChain
+from log_api.qa import QAChain, deterministic_empty_context_answer
 from log_api.retriever import HybridRetriever, RetrievedChunk, RetrieverConfig
 
 
@@ -30,10 +30,16 @@ class ApiConfig:
     top_k: int
     retrieval_mode: str
     retrieval_candidate_k: int
+    trace_candidate_k: int
     reranker_model: str
     rrf_k: int
     dense_weight: float
     lexical_weight: float
+    trace_rerank_score_gap: float
+    trace_cosine_score_gap: float
+    temporal_top_k: int
+    max_trace_chunks: int
+    max_context_chars: int
     llm_provider: str
     llm_model: str
     ollama_base_url: str
@@ -57,6 +63,12 @@ class ApiConfig:
         retrieval_candidate_k = int(os.getenv("RETRIEVAL_CANDIDATE_K", "20"))
         if retrieval_candidate_k <= 0:
             raise RuntimeError("RETRIEVAL_CANDIDATE_K must be positive")
+        trace_candidate_k = int(
+            os.getenv("TRACE_CANDIDATE_K", str(retrieval_candidate_k))
+        )
+        if trace_candidate_k <= 0:
+            raise RuntimeError("TRACE_CANDIDATE_K must be positive")
+        trace_candidate_k = max(trace_candidate_k, top_k)
         rrf_k = int(os.getenv("RRF_K", "60"))
         if rrf_k <= 0:
             raise RuntimeError("RRF_K must be positive")
@@ -66,6 +78,23 @@ class ApiConfig:
             raise RuntimeError("RRF weights must be non-negative")
         if dense_weight == 0 and lexical_weight == 0:
             raise RuntimeError("at least one RRF weight must be positive")
+        trace_rerank_score_gap = float(
+            os.getenv("TRACE_RERANK_SCORE_GAP", "1.0")
+        )
+        trace_cosine_score_gap = float(os.getenv("TRACE_COSINE_SCORE_GAP", "0.05"))
+        if trace_rerank_score_gap < 0:
+            raise RuntimeError("TRACE_RERANK_SCORE_GAP must be non-negative")
+        if trace_cosine_score_gap < 0:
+            raise RuntimeError("TRACE_COSINE_SCORE_GAP must be non-negative")
+        temporal_top_k = int(os.getenv("TEMPORAL_TOP_K", "10"))
+        max_trace_chunks = int(os.getenv("MAX_TRACE_CHUNKS", "50"))
+        max_context_chars = int(os.getenv("MAX_CONTEXT_CHARS", "50000"))
+        if temporal_top_k <= 0:
+            raise RuntimeError("TEMPORAL_TOP_K must be positive")
+        if max_trace_chunks <= 0:
+            raise RuntimeError("MAX_TRACE_CHUNKS must be positive")
+        if max_context_chars <= 0:
+            raise RuntimeError("MAX_CONTEXT_CHARS must be positive")
         llm_provider = required("LLM_PROVIDER").lower()
         if llm_provider not in {"groq", "ollama"}:
             raise RuntimeError("LLM_PROVIDER must be either 'groq' or 'ollama'")
@@ -80,6 +109,7 @@ class ApiConfig:
             top_k=top_k,
             retrieval_mode=retrieval_mode,
             retrieval_candidate_k=retrieval_candidate_k,
+            trace_candidate_k=trace_candidate_k,
             reranker_model=os.getenv(
                 "RERANKER_MODEL",
                 "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -87,6 +117,11 @@ class ApiConfig:
             rrf_k=rrf_k,
             dense_weight=dense_weight,
             lexical_weight=lexical_weight,
+            trace_rerank_score_gap=trace_rerank_score_gap,
+            trace_cosine_score_gap=trace_cosine_score_gap,
+            temporal_top_k=temporal_top_k,
+            max_trace_chunks=max_trace_chunks,
+            max_context_chars=max_context_chars,
             llm_provider=llm_provider,
             llm_model=required("LLM_MODEL"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -102,6 +137,7 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     retrieved_chunks: list[RetrievedChunk]
+    retrieval_note: str | None = None
 
 
 class RAGService:
@@ -114,10 +150,15 @@ class RAGService:
                 top_k=config.top_k,
                 retrieval_mode=config.retrieval_mode,
                 candidate_k=config.retrieval_candidate_k,
+                trace_candidate_k=config.trace_candidate_k,
                 reranker_model=config.reranker_model,
                 rrf_k=config.rrf_k,
                 dense_weight=config.dense_weight,
                 lexical_weight=config.lexical_weight,
+                trace_rerank_score_gap=config.trace_rerank_score_gap,
+                trace_cosine_score_gap=config.trace_cosine_score_gap,
+                temporal_top_k=config.temporal_top_k,
+                max_trace_chunks=config.max_trace_chunks,
             )
         )
         self.qa_chain: QAChain | None = None
@@ -129,17 +170,26 @@ class RAGService:
         await self.retriever.close()
 
     async def ask(self, question: str) -> AskResponse:
-        chunks = await self.retriever.retrieve(question)
-        if self.qa_chain is None:
-            self.qa_chain = QAChain(
-                self.config.llm_provider,
-                self.config.llm_model,
-                self.config.ollama_base_url,
-                self.config.groq_base_url,
-                self.config.groq_api_key,
-            )
-        answer = await self.qa_chain.answer(question, chunks)
-        return AskResponse(answer=answer, retrieved_chunks=chunks)
+        retrieval = await self.retriever.retrieve_with_context(question)
+        chunks = retrieval.chunks
+        if not chunks:
+            answer = deterministic_empty_context_answer(retrieval.note)
+        else:
+            if self.qa_chain is None:
+                self.qa_chain = QAChain(
+                    self.config.llm_provider,
+                    self.config.llm_model,
+                    self.config.ollama_base_url,
+                    self.config.groq_base_url,
+                    self.config.groq_api_key,
+                    self.config.max_context_chars,
+                )
+            answer = await self.qa_chain.answer(question, chunks, retrieval.note)
+        return AskResponse(
+            answer=answer,
+            retrieved_chunks=chunks,
+            retrieval_note=retrieval.note,
+        )
 
 
 def create_app(service: Any | None = None) -> FastAPI:

@@ -57,6 +57,27 @@ class BehaviorClassification:
         return self.raw_output or "<empty classifier output>"
 
 
+def classify_empty_retrieval(retrieval_note: str | None) -> BehaviorClassification:
+    """Classify empty retrieval without spending an LLM call.
+
+    A service-specific no-incident note maps to the dedicated label. Other
+    empty retrieval cases are abstentions because there is no evidence to use.
+    """
+
+    normalized_note = (retrieval_note or "").casefold()
+    if (
+        "no correlated incident" in normalized_note
+        or "no chunks were found for the requested service" in normalized_note
+    ):
+        label = "report_no_correlated_incident"
+    else:
+        label = "abstain"
+    return BehaviorClassification(
+        raw_output=f"<deterministic empty retrieval: {label}>",
+        label=label,
+    )
+
+
 def behavior_matches(expected_behavior: str, classification: BehaviorClassification) -> bool:
     """Apply the safe policy: invalid classifier output is always a mismatch."""
 

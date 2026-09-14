@@ -20,7 +20,12 @@ import asyncpg
 import httpx
 from dotenv import load_dotenv
 
-from evaluation.behavior_classifier import BehaviorClassifier, behavior_matches
+from evaluation.behavior_classifier import (
+    BehaviorClassification,
+    BehaviorClassifier,
+    behavior_matches,
+    classify_empty_retrieval,
+)
 from evaluation.provider import EvaluationLLMConfig
 from evaluation.ragas_metrics import score_ragas
 from log_generator.scenarios import SCENARIOS
@@ -69,6 +74,9 @@ def load_questions(path: Path) -> list[dict[str, Any]]:
 
 
 def reference_for(question: dict[str, Any]) -> str | None:
+    explicit_reference = question.get("reference_answer")
+    if explicit_reference:
+        return explicit_reference
     scenario_id = question.get("scenario_id")
     if not scenario_id:
         return None
@@ -98,8 +106,8 @@ async def insert_rows(
       run_id, run_timestamp, stage_name, question_id, question_text, category,
       generated_answer, retrieved_chunk_ids, faithfulness, context_precision,
       context_recall, answer_relevancy, classified_behavior, behavior_match,
-      latency_ms
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+      classifier_failed, latency_ms
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
     """
     connection = await asyncpg.connect(dsn)
     try:
@@ -121,6 +129,7 @@ async def insert_rows(
                     row["answer_relevancy"],
                     row["classified_behavior"],
                     row["behavior_match"],
+                    row["classifier_failed"],
                     row["latency_ms"],
                 )
                 for row in rows
@@ -171,7 +180,25 @@ async def run() -> None:
                 retrieved_chunks = payload.get("retrieved_chunks", [])
                 contexts = [chunk["content"] for chunk in retrieved_chunks]
                 reference = reference_for(question)
-                classification = await classifier.classify(question_text, answer)
+                if retrieved_chunks:
+                    try:
+                        classification = await classifier.classify(question_text, answer)
+                    except Exception as exc:
+                        print(
+                            f"behavior classifier failed for {question_id}: "
+                            f"{type(exc).__name__}",
+                            flush=True,
+                        )
+                        classification = BehaviorClassification(
+                            raw_output=(
+                                f"<classifier failure: {type(exc).__name__}>"
+                            ),
+                            label=None,
+                        )
+                else:
+                    classification = classify_empty_retrieval(
+                        payload.get("retrieval_note")
+                    )
 
                 if args.skip_ragas:
                     scores = {
@@ -199,13 +226,20 @@ async def run() -> None:
                     "retrieved_chunk_ids": [chunk["id"] for chunk in retrieved_chunks],
                     **scores,
                     "classified_behavior": classification.stored_value,
-                    "behavior_match": behavior_matches(
-                        question["expected_behavior"], classification
+                    "classifier_failed": classification.label is None,
+                    "behavior_match": (
+                        None
+                        if classification.label is None
+                        else behavior_matches(
+                            question["expected_behavior"], classification
+                        )
                     ),
                     "latency_ms": latency_ms,
                 }
                 rows.append(row)
-                classifier_status = "classifier_failure" if classification.label is None else ""
+                classifier_status = (
+                    "classifier_failure" if row["classifier_failed"] else ""
+                )
                 print(
                     f"{question_id}: latency={latency_ms:.1f}ms "
                     f"chunks={len(retrieved_chunks)} "
