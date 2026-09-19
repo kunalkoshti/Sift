@@ -74,15 +74,19 @@
   },
   {
     "id": "payment-vs-lock-ambiguity",
-    "question": "What caused the payment failures: the payment worker OOM and restart path, or PostgreSQL lock contention? Compare the evidence and flag if the retrieved logs do not uniquely identify one incident.",
-    "category": "ambiguous",
-    "expected_behavior": "flag_ambiguity"
+    "question": "What evidence in the retrieved logs supports the payment worker OOM path, and is PostgreSQL lock contention also supported by the retrieved evidence?",
+    "category": "retrieval-coverage",
+    "scenario_id": "payment-timeout-v1",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "The retrieved evidence supports the payment worker OOM path through memory growth, the OOM kill, the restart, readiness failure, connection-pool exhaustion, and the payment authorization timeout. PostgreSQL lock contention should only be claimed if lock-related log evidence is present in the retrieved context."
   },
   {
     "id": "checkout-vs-lock-ambiguity",
-    "question": "The logs show checkout and gateway failures. Were they caused by a checkout crash loop or PostgreSQL lock contention, and do the logs uniquely identify one incident?",
-    "category": "ambiguous",
-    "expected_behavior": "flag_ambiguity"
+    "question": "What evidence explains the checkout and gateway failures, and does the retrieved evidence support checkout-service or PostgreSQL lock contention as the cause?",
+    "category": "cross-incident-attribution",
+    "scenario_id": "checkout-502-v1",
+    "expected_behavior": "answer_with_evidence",
+    "reference_answer": "The checkout 502 evidence points to checkout-service: configuration validation failed, the readiness probe failed, and checkout entered a crash loop. Nginx then recorded the upstream timeout and returned 502. PostgreSQL lock contention should not be claimed unless matching lock-related log evidence is present."
   },
   {
     "id": "midnight-downstream-ambiguity",
@@ -170,7 +174,8 @@
     "question": "Why did postgres-related requests fail last night?",
     "category": "service-temporal-filter",
     "filter_case": "service_and_time_with_trace_expansion",
-    "expected_behavior": "flag_ambiguity"
+    "scenario_id": "postgres-lock-contention-v1",
+    "expected_behavior": "answer_with_evidence"
   },
   {
     "id": "payment-critical-last-night",

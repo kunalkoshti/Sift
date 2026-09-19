@@ -32,7 +32,7 @@ from log_generator.scenarios import SCENARIOS
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_QUESTIONS = ROOT / "evaluation" / "questions.json"
+DEFAULT_QUESTIONS = ROOT / "evaluation" / "questions_stage4.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +86,65 @@ def reference_for(question: dict[str, Any]) -> str | None:
         raise ValueError(f"question references unknown scenario {scenario_id!r}") from exc
 
 
+def is_temporal_fallback_note(retrieval_note: str | None) -> bool:
+    """Identify answers produced after an empty time-filter fallback."""
+
+    normalized = (retrieval_note or "").casefold()
+    return "no chunks found in the requested time range" in normalized
+
+
+def fallback_was_disclosed(
+    *,
+    retrieval_note: str | None,
+    answer: str,
+) -> bool | None:
+    """Check that a fallback answer discloses the requested-range miss.
+
+    This is deliberately separate from the four behavior labels. A fallback
+    answer may be a valid evidence-based answer, but it must not imply that
+    the evidence came from the requested time range.
+    """
+
+    if not is_temporal_fallback_note(retrieval_note):
+        return None
+
+    normalized_answer = " ".join(answer.casefold().split())
+    explicit_disclosure_terms = (
+        "no logs were found",
+        "no chunks were found",
+        "no log entries",
+        "no other events were returned",
+        "no other traces were returned",
+        "outside the requested time range",
+        "outside the requested period",
+        "not in the requested time range",
+        "not from the requested time range",
+        "limited to the evidence that was actually retrieved",
+    )
+    mentions_requested_scope = (
+        "requested" in normalized_answer
+        and any(
+            term in normalized_answer
+            for term in ("time range", "time window", "period", "window", "last week")
+        )
+    )
+    if mentions_requested_scope and any(
+        term in normalized_answer for term in explicit_disclosure_terms
+    ):
+        return True
+
+    mentions_fallback_source = any(
+        term in normalized_answer
+        for term in (
+            "full available time range",
+            "full available corpus",
+            "available corpus",
+            "fallback",
+        )
+    )
+    return mentions_fallback_source and mentions_requested_scope
+
+
 async def ask_one(client: httpx.AsyncClient, api_url: str, question: str) -> tuple[dict[str, Any], float]:
     started = time.perf_counter()
     response = await client.post(f"{api_url.rstrip('/')}/ask", json={"question": question})
@@ -106,8 +165,8 @@ async def insert_rows(
       run_id, run_timestamp, stage_name, question_id, question_text, category,
       generated_answer, retrieved_chunk_ids, faithfulness, context_precision,
       context_recall, answer_relevancy, classified_behavior, behavior_match,
-      classifier_failed, latency_ms
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      classifier_failed, fallback_disclosed, latency_ms
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
     """
     connection = await asyncpg.connect(dsn)
     try:
@@ -130,6 +189,7 @@ async def insert_rows(
                     row["classified_behavior"],
                     row["behavior_match"],
                     row["classifier_failed"],
+                    row["fallback_disclosed"],
                     row["latency_ms"],
                 )
                 for row in rows
@@ -182,7 +242,11 @@ async def run() -> None:
                 reference = reference_for(question)
                 if retrieved_chunks:
                     try:
-                        classification = await classifier.classify(question_text, answer)
+                        classification = await classifier.classify(
+                            question_text,
+                            answer,
+                            payload.get("retrieval_note"),
+                        )
                     except Exception as exc:
                         print(
                             f"behavior classifier failed for {question_id}: "
@@ -216,6 +280,9 @@ async def run() -> None:
                         config=eval_config,
                         embedding_model=embedding_model,
                         metric_delay_seconds=args.metric_delay_seconds,
+                        score_context_metrics=not is_temporal_fallback_note(
+                            payload.get("retrieval_note")
+                        ),
                     )
 
                 row = {
@@ -227,6 +294,10 @@ async def run() -> None:
                     **scores,
                     "classified_behavior": classification.stored_value,
                     "classifier_failed": classification.label is None,
+                    "fallback_disclosed": fallback_was_disclosed(
+                        retrieval_note=payload.get("retrieval_note"),
+                        answer=answer,
+                    ),
                     "behavior_match": (
                         None
                         if classification.label is None

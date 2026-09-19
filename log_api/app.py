@@ -39,12 +39,15 @@ class ApiConfig:
     trace_cosine_score_gap: float
     temporal_top_k: int
     max_trace_chunks: int
+    confidence_gate_mode: str
+    min_dense_similarity: float
     max_context_chars: int
     llm_provider: str
     llm_model: str
     ollama_base_url: str
     groq_base_url: str
     groq_api_key: str | None
+    log_level: str
 
     @classmethod
     def from_env(cls) -> ApiConfig:
@@ -89,6 +92,18 @@ class ApiConfig:
         temporal_top_k = int(os.getenv("TEMPORAL_TOP_K", "10"))
         max_trace_chunks = int(os.getenv("MAX_TRACE_CHUNKS", "50"))
         max_context_chars = int(os.getenv("MAX_CONTEXT_CHARS", "50000"))
+        confidence_gate_mode = os.getenv(
+            "SELFRAG_CONFIDENCE_GATE_MODE", "shadow"
+        ).lower()
+        if confidence_gate_mode not in {"off", "shadow", "enforce"}:
+            raise RuntimeError(
+                "SELFRAG_CONFIDENCE_GATE_MODE must be off, shadow, or enforce"
+            )
+        min_dense_similarity = float(
+            os.getenv("SELFRAG_MIN_DENSE_SIMILARITY", "0.55")
+        )
+        if not -1.0 <= min_dense_similarity <= 1.0:
+            raise RuntimeError("SELFRAG_MIN_DENSE_SIMILARITY must be between -1 and 1")
         if temporal_top_k <= 0:
             raise RuntimeError("TEMPORAL_TOP_K must be positive")
         if max_trace_chunks <= 0:
@@ -102,6 +117,9 @@ class ApiConfig:
         groq_api_key = os.getenv("GROQ_API_KEY")
         if llm_provider == "groq" and not groq_api_key:
             raise RuntimeError("GROQ_API_KEY must be configured when LLM_PROVIDER='groq'")
+        log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        if log_level not in logging.getLevelNamesMapping():
+            raise RuntimeError(f"LOG_LEVEL must be a valid logging level, got {log_level!r}")
 
         return cls(
             postgres_dsn=required("POSTGRES_DSN"),
@@ -122,12 +140,33 @@ class ApiConfig:
             temporal_top_k=temporal_top_k,
             max_trace_chunks=max_trace_chunks,
             max_context_chars=max_context_chars,
+            confidence_gate_mode=confidence_gate_mode,
+            min_dense_similarity=min_dense_similarity,
             llm_provider=llm_provider,
             llm_model=required("LLM_MODEL"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             groq_api_key=groq_api_key,
+            log_level=log_level,
         )
+
+
+def configure_application_logging(level_name: str) -> None:
+    """Ensure log_api diagnostics are visible under Uvicorn and Docker."""
+
+    level = logging.getLevelNamesMapping().get(level_name.upper())
+    if not isinstance(level, int):
+        raise ValueError(f"invalid logging level: {level_name!r}")
+
+    application_logger = logging.getLogger("log_api")
+    application_logger.setLevel(level)
+    if not application_logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        application_logger.addHandler(handler)
+    application_logger.propagate = False
 
 
 class AskRequest(BaseModel):
@@ -159,11 +198,14 @@ class RAGService:
                 trace_cosine_score_gap=config.trace_cosine_score_gap,
                 temporal_top_k=config.temporal_top_k,
                 max_trace_chunks=config.max_trace_chunks,
+                confidence_gate_mode=config.confidence_gate_mode,
+                min_dense_similarity=config.min_dense_similarity,
             )
         )
         self.qa_chain: QAChain | None = None
 
     async def start(self) -> None:
+        configure_application_logging(self.config.log_level)
         await self.retriever.start()
 
     async def close(self) -> None:

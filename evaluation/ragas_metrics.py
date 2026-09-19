@@ -67,10 +67,18 @@ class SentenceTransformerRagasEmbeddings(BaseRagasEmbedding):
 def should_score_context_metrics(
     reference: str | None,
     contexts: list[str],
+    *,
+    excluded: bool = False,
 ) -> bool:
     """Return whether reference-based retrieval metrics have valid inputs."""
 
-    return bool(reference and contexts)
+    return not excluded and bool(reference and contexts)
+
+
+def should_score_faithfulness(contexts: list[str]) -> bool:
+    """Faithfulness is undefined when the answer had no retrieved context."""
+
+    return bool(contexts)
 
 
 @lru_cache(maxsize=1)
@@ -108,6 +116,7 @@ async def score_ragas(
     config: EvaluationLLMConfig,
     embedding_model: str,
     metric_delay_seconds: float = 0.0,
+    score_context_metrics: bool = True,
 ) -> dict[str, float | None]:
     """Score one answer. Reference-dependent metrics remain null without a reference."""
 
@@ -139,13 +148,14 @@ async def score_ragas(
             scores[name] = None
             print(f"RAGAS metric {name} failed: {exc}")
 
-    await run_metric(
-        "faithfulness",
-        Faithfulness(llm=llm),
-        user_input=question,
-        response=answer,
-        retrieved_contexts=contexts,
-    )
+    if should_score_faithfulness(contexts):
+        await run_metric(
+            "faithfulness",
+            Faithfulness(llm=llm),
+            user_input=question,
+            response=answer,
+            retrieved_contexts=contexts,
+        )
     await run_metric(
         "answer_relevancy",
         AnswerRelevancy(llm=llm, embeddings=embeddings),
@@ -156,7 +166,11 @@ async def score_ragas(
     # RAGAS requires retrieved_contexts for both context metrics. Empty
     # retrievals are valid behavior for abstention tests, but they cannot
     # produce a meaningful precision/recall score.
-    if should_score_context_metrics(reference, contexts):
+    if should_score_context_metrics(
+        reference,
+        contexts,
+        excluded=not score_context_metrics,
+    ):
         from ragas.metrics.collections import ContextPrecision, ContextRecall
 
         await run_metric(

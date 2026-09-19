@@ -34,6 +34,13 @@ def test_format_context_always_sorts_chunks_chronologically():
 def test_prompt_separates_multiple_traces():
     assert "analyze each trace separately" in SYSTEM_PROMPT
     assert "do not\nmerge events from different traces" in SYSTEM_PROMPT
+    assert "preserve that\nambiguity" in SYSTEM_PROMPT
+    assert "absence of another trace" in SYSTEM_PROMPT
+    assert "retrieved context" in SYSTEM_PROMPT
+
+
+def test_prompt_requires_fallback_disclosure():
+    assert "requested time range and" in SYSTEM_PROMPT
 
 
 def test_format_context_has_a_hard_character_limit():
