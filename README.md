@@ -77,6 +77,19 @@ Severity is still stored and shown in context, but it is not used as a hard retr
 
 Unknown services, unsupported time expressions, and empty retrievals are handled deterministically. If multiple incident traces have similarly strong scores, the API expands them separately and adds an ambiguity note.
 
+Gate 1 self-RAG confidence handling is controlled by `SELFRAG_CONFIDENCE_GATE_MODE`.
+In `shadow` mode it logs the best dense cosine similarity and proposed decision
+without changing answers. In `enforce` mode, weak dense evidence with no correlated
+trace returns a deterministic abstention before the LLM is called. The initial
+default threshold is provisional and must be calibrated from score distributions;
+RRF and reranker scores are not used as confidence thresholds.
+Recognized service-filter queries that return chunks bypass this gate, including
+noise-only results, so they retain service-specific no-incident handling. Queries
+that use the temporal full-corpus fallback also bypass the gate because their
+retrieval result has a different interpretation. A trace in the top-k candidates
+counts as strong evidence; a trace found deeper in the pre-expansion pool counts
+only when its dense similarity reaches the configured threshold.
+
 ## Setup
 
 Create local configuration:
@@ -152,9 +165,11 @@ The harness stores one row per question in eval_runs and records:
 - context recall;
 - classified behavior;
 - behavior match;
-- classifier failure state.
+- classifier failure state;
+- fallback disclosure for time-range fallback answers.
 
-Context precision and recall are skipped when there is no reference answer or no retrieved context. The last-week-no-results fallback question is excluded from aggregate context precision/recall reporting because its result depends on the fallback retrieval note rather than ordinary in-range retrieval.
+Faithfulness is skipped when no context was retrieved. Context precision and recall are skipped when there is no reference answer or no retrieved context. The last-week-no-results fallback question is excluded from aggregate context precision/recall reporting because its result depends on the fallback retrieval note rather than ordinary in-range retrieval.
+Behavior classification receives the API retrieval note, and fallback disclosure is recorded separately from the four behavior labels.
 
 Run the current evaluation with the provider configured in .env:
 
@@ -163,7 +178,7 @@ RAGAS_MAX_TOKENS=4096 \
 log_generator/.venv/bin/python -m evaluation.run_eval \
   --api-url http://localhost:8001 \
   --questions evaluation/questions_stage4.json \
-  --stage stage_4_filter_coverage_32_final \
+  --stage gate1_final_baseline_clean \
   --delay-seconds 60 \
   --metric-delay-seconds 60
 ~~~
@@ -172,29 +187,32 @@ Use a new stage name for every distinct run. Compare results only when the quest
 
 ## Latest recorded evaluation
 
-The final 32-question filter evaluation stored all 32 rows.
+The final Gate 1 baseline stored all 32 rows under
+`gate1_final_baseline_clean`.
 
-Reportable aggregate results:
+Aggregate results:
 
 | Metric | Result | Valid values |
 |---|---:|---:|
-| Faithfulness | 0.7361 | 29/32 |
-| Answer relevancy | 0.7467 | 32/32 |
-| Context precision | 0.8182 | 18/18 |
-| Context recall | 0.9167 | 18/18 |
-| Behavior match | 90.63% | 29/32 |
+| Faithfulness | 0.785 | 29/32 |
+| Answer relevancy | 0.768 | 32/32 |
+| Context precision | 0.902 | 21/32 |
+| Context recall | 0.893 | 21/32 |
+| Behavior match | 96.88% | 31/32 |
 
-The run had no provider rate-limit failures and no classifier failures. Three faithfulness values were intentionally unavailable because those questions retrieved no chunks.
+The run had no provider, API, or classifier failures. Three faithfulness values
+were intentionally unavailable because those questions retrieved no chunks.
+Context precision and recall were scored only for questions with usable reference
+answers and in-scope retrieved context.
 
-Three ambiguity questions were classified as answer_with_evidence instead of flag_ambiguity:
-
-- midnight-downstream-ambiguity
-- payment-vs-lock-ambiguity
-- postgres-causal-expansion
-
-The scores indicate strong retrieval coverage on the reportable reference-backed questions, but answer grounding and ambiguity handling still need improvement.
-
-Earlier evaluation tables are intentionally not included here because they used different question sets and are not directly comparable.
+The only behavior mismatch was `midnight-downstream-ambiguity`, where the model
+answered from a single retrieved trace instead of explicitly flagging ambiguity.
+This remains a documented retrieval limitation. The recorded run also contained
+one false-negative `fallback_disclosed` flag caused by wording variation; the
+answer itself disclosed that it used the retrieved evidence outside the requested
+time window, and the checker now recognizes that wording. Earlier evaluation
+tables are not included because they used different question sets or scoring
+policies.
 
 ## Tests
 
@@ -210,6 +228,8 @@ docker compose config --quiet
 - Broad service-only queries can select one relevant trace while missing another related trace.
 - Broad temporal queries can include background noise and only partial incident coverage.
 - Similar incidents are not always disambiguated correctly.
+- When only one trace is retrieved, the answer may describe that trace confidently
+  without proving that competing incidents are absent from the full corpus.
 - When three or more traces are found, only the top two are expanded.
 - Trace expansion is capped to protect context size.
 - Severity is stored but not an exact retrieval filter.
@@ -224,6 +244,7 @@ Potential next improvements are:
 
 - improve multi-trace selection for broad service queries;
 - improve temporal retrieval coverage while controlling noise;
+- calibrate and evaluate the Gate 1 confidence threshold on the frozen question set;
 - add query expansion or HyDE and evaluate each independently;
 - add bounded retries and explicit error storage for evaluation metrics;
 - replace truncate-and-rebuild embedding with incremental processing;

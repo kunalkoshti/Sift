@@ -38,6 +38,11 @@ Use report_no_correlated_incident only when the answer affirmatively reports
 that no notable or trace-correlated incident was found for the named service.
 Use abstain when the answer says the logs lack enough information, including
 for unsupported aggregate questions.
+If the retrieval note says the requested time range had no chunks but the
+system answered using fallback log evidence, classify the answer as
+answer_with_evidence when it provides evidence from the available logs. Do not
+use report_no_correlated_incident merely because the requested time range was
+empty; that label is for a named service with no correlated incident.
 
 Return exactly one label, lowercase, with no explanation or punctuation.
 """
@@ -95,6 +100,7 @@ async def classify_behavior(
     *,
     question: str,
     answer: str,
+    retrieval_note: str | None = None,
     config: EvaluationLLMConfig,
     model_name: str | None = None,
 ) -> BehaviorClassification:
@@ -105,7 +111,7 @@ async def classify_behavior(
         model_name=model_name,
     )
     try:
-        return await classifier.classify(question, answer)
+        return await classifier.classify(question, answer, retrieval_note)
     finally:
         await classifier.close()
 
@@ -123,8 +129,15 @@ class BehaviorClassifier:
         self.model_name = model_name or config.model
         self.client = config.build_client()
 
-    async def classify(self, question: str, answer: str) -> BehaviorClassification:
+    async def classify(
+        self,
+        question: str,
+        answer: str,
+        retrieval_note: str | None = None,
+    ) -> BehaviorClassification:
         """Classify one question/answer pair with a deterministic single-label prompt."""
+
+        note = retrieval_note or "<none>"
 
         completion = await self.client.chat.completions.create(
             model=self.model_name,
@@ -135,7 +148,11 @@ class BehaviorClassifier:
                 {"role": "system", "content": CLASSIFIER_SYSTEM_PROMPT},
                 {
                     "role": "user",
-                    "content": f"Question:\n{question}\n\nSystem answer:\n{answer}",
+                    "content": (
+                        f"Question:\n{question}\n\n"
+                        f"Retrieval note:\n{note}\n\n"
+                        f"System answer:\n{answer}"
+                    ),
                 },
             ],
         )
@@ -150,6 +167,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Manually test the behavior classifier")
     parser.add_argument("--question", required=True)
     parser.add_argument("--answer", required=True)
+    parser.add_argument("--retrieval-note")
     return parser.parse_args()
 
 
@@ -160,6 +178,7 @@ async def main() -> None:
     result = await classify_behavior(
         question=args.question,
         answer=args.answer,
+        retrieval_note=args.retrieval_note,
         config=EvaluationLLMConfig.from_env(),
         model_name=(
             os.getenv("EVAL_CLASSIFIER_MODEL")

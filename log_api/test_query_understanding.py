@@ -14,11 +14,15 @@ ANCHOR = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
 
 
 def test_service_filter_matches_known_services_in_query_order():
-    assert resolve_service_filter("nginx and payment issues") == [
-        "nginx",
-        "payment-service",
-    ]
+    assert resolve_service_filter("nginx and payment issues") == ["nginx"]
+    assert resolve_service_filter("payment service issues") == ["payment-service"]
+    assert resolve_service_filter("checkout failures") == []
+    assert resolve_service_filter("checkout service failures") == ["checkout-service"]
+    assert resolve_service_filter("Which customers had payment issues?") == []
     assert resolve_service_filter("show me postgres errors") == ["postgres"]
+    assert resolve_service_filter("What caused the PostgreSQL lock contention?") == [
+        "postgres"
+    ]
     assert resolve_service_filter("what happened") == []
     assert resolve_service_filter("show me kafka errors") == []
 
@@ -67,4 +71,5 @@ def test_parse_query_classifies_the_three_intents():
 
     topic_only = parse_query("why did payments fail", ANCHOR)
     assert topic_only.intent == "topic_only"
+    assert topic_only.service_filter == []
     assert classify_intent(topic_only.original, None, []) == "topic_only"

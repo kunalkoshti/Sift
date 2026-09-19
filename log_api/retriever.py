@@ -17,6 +17,7 @@ from log_api.query_understanding import (
     ParsedQuery,
     parse_query,
 )
+from log_api.selfrag import evaluate_confidence_gate
 
 
 logger = logging.getLogger(__name__)
@@ -116,6 +117,8 @@ class RetrieverConfig:
     trace_cosine_score_gap: float = 0.05
     temporal_top_k: int = 10
     max_trace_chunks: int = 50
+    confidence_gate_mode: str = "shadow"
+    min_dense_similarity: float = 0.55
 
 
 @dataclass(frozen=True)
@@ -400,6 +403,8 @@ class HybridRetriever:
             raise RuntimeError("temporal_top_k must be positive")
         if self.config.max_trace_chunks <= 0:
             raise RuntimeError("max_trace_chunks must be positive")
+        if not -1.0 <= self.config.min_dense_similarity <= 1.0:
+            raise RuntimeError("min_dense_similarity must be between -1 and 1")
 
         self.pool = await asyncpg.create_pool(self.config.postgres_dsn)
         async with self.pool.acquire() as connection:
@@ -476,6 +481,7 @@ class HybridRetriever:
             query_vector = await asyncio.to_thread(encode_query, self.model, question)
 
         note: str | None = None
+        fallback_used = False
         async with self.pool.acquire() as connection:
             if parsed.intent == "temporal_only":
                 range_start, range_end = parsed.time_range or (anchor, anchor)
@@ -514,6 +520,7 @@ class HybridRetriever:
                 )
 
             if not candidates and parsed.time_range is not None:
+                fallback_used = True
                 fallback_query = replace(parsed, time_range=None, intent="topic_only")
                 if query_vector is None:
                     query_vector = await asyncio.to_thread(encode_query, self.model, question)
@@ -524,14 +531,57 @@ class HybridRetriever:
                     query_vector,
                     candidate_limit,
                 )
-                note = (
-                    "No chunks found in the requested time range. "
-                    "Answering from the full available time range while preserving "
-                    "the requested service filter."
+                note = "No chunks found in the requested time range. "
+                note += "Answering from the full available time range"
+                if parsed.service_filter:
+                    note += " while preserving the requested service filter"
+                note += "."
+
+            service_filter_applied = bool(parsed.service_filter and candidates)
+            initial_candidates = candidates[:limit] if query_vector is not None else []
+            confidence = evaluate_confidence_gate(
+                initial_candidates,
+                threshold=self.config.min_dense_similarity,
+                mode=self.config.confidence_gate_mode,
+                retrieval_mode=self.config.retrieval_mode,
+                semantic_retrieval=query_vector is not None,
+                service_filter_applied=service_filter_applied,
+                fallback_used=fallback_used,
+                trace_candidates=candidates if query_vector is not None else None,
+            )
+            logger.info(
+                "selfrag_confidence_gate question=%r mode=%s eligible=%s "
+                "would_abstain=%s "
+                "enforced=%s best_dense_similarity=%s "
+                "best_trace_dense_similarity=%s threshold=%.4f "
+                "has_trace=%s has_strong_trace=%s service_filter_applied=%s "
+                "fallback_used=%s "
+                "candidate_count=%d reason=%s",
+                question,
+                confidence.mode,
+                confidence.eligible,
+                confidence.would_abstain,
+                confidence.enforced_abstention,
+                confidence.best_dense_similarity,
+                confidence.best_trace_dense_similarity,
+                self.config.min_dense_similarity,
+                confidence.has_trace,
+                confidence.has_strong_trace,
+                service_filter_applied,
+                fallback_used,
+                len(initial_candidates),
+                confidence.reason,
+            )
+            if confidence.enforced_abstention:
+                return RetrievalResult(
+                    chunks=[],
+                    note=(
+                        "Retrieval confidence was below the configured threshold; "
+                        "the available evidence was not sufficient to answer safely."
+                    ),
                 )
 
             if query_vector is not None:
-                initial_candidates = candidates[:limit]
                 score_gap = (
                     self.config.trace_cosine_score_gap
                     if self.config.retrieval_mode == "dense"

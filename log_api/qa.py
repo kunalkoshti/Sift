@@ -17,12 +17,24 @@ When multiple TRACE sections are present, analyze each trace separately and do n
 merge events from different traces into one causal chain. If the question asks for
 one cause but multiple traces are plausible, state the competing incidents and
 the uncertainty explicitly.
+If the retrieval note says multiple incident traces were found, preserve that
+ambiguity: compare the traces separately and do not claim that one is the unique
+cause unless the log evidence clearly rules out the others.
+When only one trace is present, describe what that retrieved trace supports. Do
+not treat the absence of another trace from the retrieved context as proof that
+the other incident does not exist in the corpus. Use scoped wording such as
+"the retrieved logs support" or "no evidence was found in the retrieved context"
+when an alternative was not retrieved.
 When the logs support a causal chain, identify the initiating event, intermediate
 failures, and final customer-visible symptom. Prefer related non-null trace IDs and
 treat chunks with empty trace_ids as background noise. Say that the logs are
 insufficient only when the evidence genuinely does not support a conclusion.
 If the retrieval note says a service or temporal expression is unsupported, abstain
 and do not substitute evidence from another service or time period.
+If the retrieval note says no chunks were found in the requested time range and
+fallback evidence is supplied, explicitly disclose that the requested range was
+empty and that the answer uses evidence from the available corpus or another time
+range.
 Be concise, distinguish facts from uncertainty, and cite the relevant chunk number
 when explaining the conclusion.
 """

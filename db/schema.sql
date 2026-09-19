@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS eval_runs (
   classified_behavior TEXT NOT NULL,
   behavior_match BOOLEAN,
   classifier_failed BOOLEAN NOT NULL DEFAULT FALSE,
+  fallback_disclosed BOOLEAN,
   latency_ms DOUBLE PRECISION NOT NULL
 );
 
@@ -89,6 +90,9 @@ ALTER TABLE eval_runs
 
 ALTER TABLE eval_runs
   ADD COLUMN IF NOT EXISTS classifier_failed BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE eval_runs
+  ADD COLUMN IF NOT EXISTS fallback_disclosed BOOLEAN;
 
 ALTER TABLE eval_runs
   ALTER COLUMN behavior_match DROP NOT NULL;

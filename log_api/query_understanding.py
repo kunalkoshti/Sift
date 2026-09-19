@@ -94,17 +94,37 @@ def resolve_service_filter(
     question: str,
     service_catalog: Sequence[str] = DEFAULT_SERVICE_CATALOG,
 ) -> list[str]:
-    """Return canonical services mentioned in the question, in query order."""
+    """Return explicitly service-scoped canonical names in query order.
+
+    Full application service names such as ``payment-service`` and
+    ``payment service`` are explicit filters. Short application words such as
+    ``payment`` and ``checkout`` are treated as topic vocabulary unless the
+    question includes the word ``service``. This prevents questions about
+    payment or checkout incidents from being narrowed accidentally. Standalone
+    infrastructure identifiers such as ``postgres`` and ``nginx`` remain
+    service filters because they are unambiguous in this catalog.
+    """
 
     normalized_question = re.sub(r"[-_]", " ", question.casefold())
     matches: list[tuple[int, int, str]] = []
+    standalone_infrastructure = {"api gateway", "nginx", "postgres"}
     for service in service_catalog:
         normalized_service = re.sub(r"[-_]", " ", service.casefold())
-        aliases = [normalized_service]
         if normalized_service.endswith(" service"):
-            aliases.append(normalized_service.removesuffix(" service"))
-        positions = [normalized_question.find(alias) for alias in aliases]
-        positions = [position for position in positions if position >= 0]
+            aliases = [normalized_service]
+        elif normalized_service in standalone_infrastructure:
+            aliases = [normalized_service]
+            if normalized_service == "postgres":
+                aliases.append("postgresql")
+        else:
+            continue
+
+        positions: list[int] = []
+        for alias in set(aliases):
+            pattern = rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])"
+            match = re.search(pattern, normalized_question)
+            if match:
+                positions.append(match.start())
         position = min(positions) if positions else -1
         if position >= 0:
             matches.append((position, -len(normalized_service), service))
