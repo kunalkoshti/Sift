@@ -90,6 +90,24 @@ retrieval result has a different interpretation. A trace in the top-k candidates
 counts as strong evidence; a trace found deeper in the pre-expansion pool counts
 only when its dense similarity reaches the configured threshold.
 
+Gate 2 performs post-generation evidence verification. It asks the configured
+API model to check whether factual answer claims are supported by specific
+retrieved chunks, timestamps, and services. It is controlled by:
+
+~~~text
+SELFRAG_EVIDENCE_GATE_MODE=shadow
+SELFRAG_EVIDENCE_MODEL=
+SELFRAG_EVIDENCE_MAX_UNSUPPORTED_CLAIMS=0
+SELFRAG_EVIDENCE_MAX_RETRIES=1
+~~~
+
+In shadow mode, Gate 2 logs verification results without changing answers. In
+enforce mode, an unsupported answer gets at most one evidence-focused rewrite;
+if it still cannot be verified, the API returns a deterministic cautious
+response. Empty retrieval bypasses Gate 2 because it already uses deterministic
+abstention. Gate 2 uses the log-api LLM configuration, while RAGAS and behavior
+classification continue using the separate `EVAL_*` configuration.
+
 ## Setup
 
 Create local configuration:
@@ -213,6 +231,24 @@ answer itself disclosed that it used the retrieved evidence outside the requeste
 time window, and the checker now recognizes that wording. Earlier evaluation
 tables are not included because they used different question sets or scoring
 policies.
+
+The Gate 2 enforce run used the same 32-question file under the stage name
+gate2_evidence_enforce_cerebras.
+
+| Metric | Gate 1 | Gate 2 enforce | Valid values |
+|---|---:|---:|---:|
+| Faithfulness | 0.785 | 0.733 | 29/32 |
+| Answer relevancy | 0.768 | 0.844 | 32/32 |
+| Context precision | 0.902 | 0.866 | 21/32 |
+| Context recall | 0.893 | 0.889 | 21/32 |
+| Behavior match | 96.88% | 96.88% | 32/32 |
+
+Gate 2 completed without API, provider, or classifier errors. Every verifier
+decision returned supported=true, so no rewrite or enforced abstention was
+triggered. The run validates stability and verifier operation, but does not yet
+demonstrate a measurable faithfulness improvement. The lower faithfulness score
+should be treated as normal model/evaluator variation rather than a confirmed
+Gate 2 regression.
 
 ## Tests
 
