@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from log_api.evidence_gate import EvidenceVerifier
 from log_api.qa import QAChain, deterministic_empty_context_answer
 from log_api.retriever import HybridRetriever, RetrievedChunk, RetrieverConfig
 
@@ -41,6 +42,10 @@ class ApiConfig:
     max_trace_chunks: int
     confidence_gate_mode: str
     min_dense_similarity: float
+    evidence_gate_mode: str
+    evidence_model: str | None
+    evidence_max_unsupported_claims: int
+    evidence_max_retries: int
     max_context_chars: int
     llm_provider: str
     llm_model: str
@@ -104,6 +109,22 @@ class ApiConfig:
         )
         if not -1.0 <= min_dense_similarity <= 1.0:
             raise RuntimeError("SELFRAG_MIN_DENSE_SIMILARITY must be between -1 and 1")
+        evidence_gate_mode = os.getenv("SELFRAG_EVIDENCE_GATE_MODE", "shadow").lower()
+        if evidence_gate_mode not in {"off", "shadow", "enforce"}:
+            raise RuntimeError(
+                "SELFRAG_EVIDENCE_GATE_MODE must be off, shadow, or enforce"
+            )
+        evidence_model = os.getenv("SELFRAG_EVIDENCE_MODEL") or None
+        evidence_max_unsupported_claims = int(
+            os.getenv("SELFRAG_EVIDENCE_MAX_UNSUPPORTED_CLAIMS", "0")
+        )
+        evidence_max_retries = int(os.getenv("SELFRAG_EVIDENCE_MAX_RETRIES", "1"))
+        if evidence_max_unsupported_claims < 0:
+            raise RuntimeError(
+                "SELFRAG_EVIDENCE_MAX_UNSUPPORTED_CLAIMS must be non-negative"
+            )
+        if not 0 <= evidence_max_retries <= 1:
+            raise RuntimeError("SELFRAG_EVIDENCE_MAX_RETRIES must be 0 or 1")
         if temporal_top_k <= 0:
             raise RuntimeError("TEMPORAL_TOP_K must be positive")
         if max_trace_chunks <= 0:
@@ -142,6 +163,10 @@ class ApiConfig:
             max_context_chars=max_context_chars,
             confidence_gate_mode=confidence_gate_mode,
             min_dense_similarity=min_dense_similarity,
+            evidence_gate_mode=evidence_gate_mode,
+            evidence_model=evidence_model,
+            evidence_max_unsupported_claims=evidence_max_unsupported_claims,
+            evidence_max_retries=evidence_max_retries,
             llm_provider=llm_provider,
             llm_model=required("LLM_MODEL"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -203,6 +228,7 @@ class RAGService:
             )
         )
         self.qa_chain: QAChain | None = None
+        self.evidence_verifier: EvidenceVerifier | None = None
 
     async def start(self) -> None:
         configure_application_logging(self.config.log_level)
@@ -227,6 +253,76 @@ class RAGService:
                     self.config.max_context_chars,
                 )
             answer = await self.qa_chain.answer(question, chunks, retrieval.note)
+            if self.config.evidence_gate_mode != "off":
+                if self.evidence_verifier is None:
+                    self.evidence_verifier = EvidenceVerifier(
+                        self.config.llm_provider,
+                        self.config.evidence_model or self.config.llm_model,
+                        self.config.ollama_base_url,
+                        self.config.groq_base_url,
+                        self.config.groq_api_key,
+                        self.config.max_context_chars,
+                    )
+                try:
+                    verification = await self.evidence_verifier.verify(
+                        question,
+                        answer,
+                        chunks,
+                        retrieval.note,
+                    )
+                    requires_action = verification.requires_action(
+                        self.config.evidence_max_unsupported_claims
+                    )
+                    retry_attempted = False
+                    retry_succeeded = False
+                    if (
+                        self.config.evidence_gate_mode == "enforce"
+                        and requires_action
+                        and self.config.evidence_max_retries > 0
+                    ):
+                        retry_attempted = True
+                        revised_answer = await self.qa_chain.revise(
+                            question,
+                            answer,
+                            chunks,
+                            retrieval.note,
+                            verification.unsupported_claims,
+                        )
+                        revised_verification = await self.evidence_verifier.verify(
+                            question,
+                            revised_answer,
+                            chunks,
+                            retrieval.note,
+                        )
+                        if not revised_verification.requires_action(
+                            self.config.evidence_max_unsupported_claims
+                        ):
+                            answer = revised_answer
+                            verification = revised_verification
+                            requires_action = False
+                            retry_succeeded = True
+                    logger.info(
+                        "selfrag_evidence_gate mode=%s supported=%s "
+                        "unsupported_claim_count=%d retry_attempted=%s "
+                        "retry_succeeded=%s final_action=%s reason=%s",
+                        self.config.evidence_gate_mode,
+                        verification.supported,
+                        verification.unsupported_claim_count,
+                        retry_attempted,
+                        retry_succeeded,
+                        "abstain" if requires_action and self.config.evidence_gate_mode == "enforce" else "return_answer",
+                        verification.reason,
+                    )
+                    if requires_action and self.config.evidence_gate_mode == "enforce":
+                        answer = (
+                            "The retrieved logs did not support all claims needed "
+                            "for a reliable answer, so I cannot answer this safely "
+                            "from the available evidence."
+                        )
+                except Exception:
+                    # A verifier outage must not take down the QA endpoint. The
+                    # failure is visible in logs and the original answer is kept.
+                    logger.exception("selfrag evidence gate failed")
         return AskResponse(
             answer=answer,
             retrieved_chunks=chunks,

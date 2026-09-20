@@ -50,6 +50,26 @@ PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+REPAIR_SYSTEM_PROMPT = SYSTEM_PROMPT + """
+This is a corrective retry. Rewrite the previous answer using only claims that
+can be supported by a specific line in the supplied context. Remove unsupported
+claims rather than filling gaps with assumptions. If the context does not
+support a reliable answer, say so explicitly.
+"""
+
+REPAIR_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", REPAIR_SYSTEM_PROMPT),
+        (
+            "human",
+            "Question:\n{question}\n\nPrevious answer:\n{previous_answer}\n\n"
+            "Retrieved log context:\n{context}\n\n"
+            "Unsupported claims identified by the evidence check:\n{unsupported_claims}",
+        ),
+    ]
+)
+
+
 def deterministic_empty_context_answer(note: str | None = None) -> str:
     """Return a safe answer without asking the LLM to reason over no evidence."""
 
@@ -171,6 +191,11 @@ class QAChain:
         if max_context_chars <= 0:
             raise ValueError("max_context_chars must be positive")
         self.max_context_chars = max_context_chars
+        self._provider = provider
+        self._model_name = model_name
+        self._ollama_base_url = ollama_base_url
+        self._groq_base_url = groq_base_url
+        self._groq_api_key = groq_api_key
         self.chain = PROMPT | build_llm(
             provider,
             model_name,
@@ -178,6 +203,7 @@ class QAChain:
             groq_base_url,
             groq_api_key,
         ) | StrOutputParser()
+        self.repair_chain = None
 
     async def answer(
         self,
@@ -188,6 +214,41 @@ class QAChain:
         return await self.chain.ainvoke(
             {
                 "question": question,
+                "context": format_context(
+                    chunks,
+                    retrieval_note,
+                    max_chars=self.max_context_chars,
+                ),
+            }
+        )
+
+    async def revise(
+        self,
+        question: str,
+        previous_answer: str,
+        chunks: list[RetrievedChunk],
+        retrieval_note: str | None = None,
+        unsupported_claims: list[str] | tuple[str, ...] = (),
+    ) -> str:
+        """Make one bounded evidence-focused correction of an answer."""
+
+        if self.repair_chain is None:
+            self.repair_chain = REPAIR_PROMPT | build_llm(
+                self._provider,
+                self._model_name,
+                self._ollama_base_url,
+                self._groq_base_url,
+                self._groq_api_key,
+            ) | StrOutputParser()
+
+        return await self.repair_chain.ainvoke(
+            {
+                "question": question,
+                "previous_answer": previous_answer,
+                "unsupported_claims": "\n".join(
+                    f"- {claim}" for claim in unsupported_claims
+                )
+                or "- No specific claim was returned; re-check every factual statement.",
                 "context": format_context(
                     chunks,
                     retrieval_note,
