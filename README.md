@@ -105,8 +105,27 @@ In shadow mode, Gate 2 logs verification results without changing answers. In
 enforce mode, an unsupported answer gets at most one evidence-focused rewrite;
 if it still cannot be verified, the API returns a deterministic cautious
 response. Empty retrieval bypasses Gate 2 because it already uses deterministic
-abstention. Gate 2 uses the log-api LLM configuration, while RAGAS and behavior
-classification continue using the separate `EVAL_*` configuration.
+abstention. The verifier references are then checked deterministically against
+the actual retrieved chunk IDs, services, and timestamps. A factual answer with
+missing or invalid references is treated as unsupported. Gate 2 uses the
+log-api LLM configuration, while RAGAS and behavior classification continue
+using the separate `EVAL_*` configuration.
+
+Gate 3 performs a deterministic scope and answerability check before retrieval.
+It blocks only high-confidence out-of-scope categories such as weather,
+financial metrics, customer demographics, and aggregate business statistics.
+Ambiguous questions and normal operational log questions continue through the
+regular retrieval, Gate 1, and Gate 2 flow.
+
+~~~text
+SELFRAG_SCOPE_GATE_MODE=shadow
+~~~
+
+In shadow mode, the scope decision is logged without changing the response. In
+enforce mode, clearly out-of-scope questions receive a deterministic response
+without an embedding, database retrieval, or LLM call. This gate is
+high-precision by design to avoid blocking valid operational questions such as
+rate-limit incidents.
 
 ## Setup
 
@@ -205,23 +224,25 @@ Use a new stage name for every distinct run. Compare results only when the quest
 
 ## Latest recorded evaluation
 
-The final Gate 1 baseline stored all 32 rows under
-`gate1_final_baseline_clean`.
+The final Self-RAG evaluation used the frozen 32-question set under
+`gate2_evidence_strict_recheck`.
 
 Aggregate results:
 
 | Metric | Result | Valid values |
 |---|---:|---:|
-| Faithfulness | 0.785 | 29/32 |
-| Answer relevancy | 0.768 | 32/32 |
-| Context precision | 0.902 | 21/32 |
-| Context recall | 0.893 | 21/32 |
+| Faithfulness | 0.784 | 25/32 |
+| Answer relevancy | 0.737 | 32/32 |
+| Context precision | 0.883 | 21/32 |
+| Context recall | 0.905 | 21/32 |
 | Behavior match | 96.88% | 31/32 |
 
-The run had no provider, API, or classifier failures. Three faithfulness values
-were intentionally unavailable because those questions retrieved no chunks.
-Context precision and recall were scored only for questions with usable reference
-answers and in-scope retrieved context.
+The run stored all 32 rows with no provider, API, or classifier failures. Seven
+questions had deterministic empty retrieval, so their faithfulness, context
+precision, and context recall values were intentionally NULL. Context precision
+and recall were also excluded for questions where those metrics are not
+meaningful, such as no-incident and fallback cases. The evidence gate ran for
+25 questions and completed three successful corrective retries.
 
 The only behavior mismatch was `midnight-downstream-ambiguity`, where the model
 answered from a single retrieved trace instead of explicitly flagging ambiguity.
@@ -232,23 +253,21 @@ time window, and the checker now recognizes that wording. Earlier evaluation
 tables are not included because they used different question sets or scoring
 policies.
 
-The Gate 2 enforce run used the same 32-question file under the stage name
-gate2_evidence_enforce_cerebras.
+For comparison, the earlier Gate 1 run used the same question set:
 
-| Metric | Gate 1 | Gate 2 enforce | Valid values |
+| Metric | Gate 1 | Final Self-RAG | Valid values |
 |---|---:|---:|---:|
-| Faithfulness | 0.785 | 0.733 | 29/32 |
-| Answer relevancy | 0.768 | 0.844 | 32/32 |
-| Context precision | 0.902 | 0.866 | 21/32 |
-| Context recall | 0.893 | 0.889 | 21/32 |
+| Faithfulness | 0.785 | 0.784 | 25/32 |
+| Answer relevancy | 0.768 | 0.737 | 32/32 |
+| Context precision | 0.902 | 0.883 | 21/32 |
+| Context recall | 0.893 | 0.905 | 21/32 |
 | Behavior match | 96.88% | 96.88% | 32/32 |
 
-Gate 2 completed without API, provider, or classifier errors. Every verifier
-decision returned supported=true, so no rewrite or enforced abstention was
-triggered. The run validates stability and verifier operation, but does not yet
-demonstrate a measurable faithfulness improvement. The lower faithfulness score
-should be treated as normal model/evaluator variation rather than a confirmed
-Gate 2 regression.
+The final Self-RAG run recovered faithfulness from the preceding evidence-gate
+run's 0.754 to 0.784 and improved context recall from 0.889 to 0.905. It did
+not materially exceed the Gate 1 faithfulness result. Self-RAG therefore adds
+deterministic scope handling, evidence validation, bounded correction, and
+better observability, but not a large aggregate RAGAS improvement.
 
 ## Tests
 
@@ -271,6 +290,15 @@ docker compose config --quiet
 - Severity is stored but not an exact retrieval filter.
 - Embeddings are rebuilt in batch rather than updated continuously.
 - External LLM provider limits can interrupt evaluation metrics.
+- The evidence verifier can still accept plausible causal explanations when
+  the logs show sequence but do not explicitly prove causation.
+- Evidence-reference validation confirms that a citation points to a real
+  chunk, timestamp, and service; it does not independently prove the semantic
+  truth of the claim.
+- Self-RAG retries add latency and token usage, and verifier outages currently
+  fail open by retaining the original answer.
+- The evaluation set is frozen for comparison but is not a held-out test set;
+  further tuning against it risks overfitting.
 - The Docker Compose setup is for local development, not high availability.
 - Authentication, authorization, multi-tenancy, alerting, and production scaling are not implemented.
 
@@ -280,8 +308,6 @@ Potential next improvements are:
 
 - improve multi-trace selection for broad service queries;
 - improve temporal retrieval coverage while controlling noise;
-- calibrate and evaluate the Gate 1 confidence threshold on the frozen question set;
 - add query expansion or HyDE and evaluate each independently;
-- add bounded retries and explicit error storage for evaluation metrics;
 - replace truncate-and-rebuild embedding with incremental processing;
 - add operational metrics, authentication, retention, and deployment hardening.

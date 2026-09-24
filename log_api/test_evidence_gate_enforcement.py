@@ -77,6 +77,7 @@ def _service(verifier, qa_chain):
         evidence_gate_mode="enforce",
         evidence_max_unsupported_claims=0,
         evidence_max_retries=1,
+        scope_gate_mode="off",
     )
     service.retriever = FakeRetriever()
     service.qa_chain = qa_chain
