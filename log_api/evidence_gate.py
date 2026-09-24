@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Any
 
@@ -36,7 +36,13 @@ Return exactly one JSON object with this shape and no Markdown:
 Mark supported=false when one or more important factual claims are not supported
 by a specific log line. A statement about uncertainty or lack of evidence is
 supported when the supplied context and retrieval note justify that statement.
-Do not mark an answer unsupported merely because it is concise.
+Every factual claim in an answer must have an evidence reference. A causal claim
+is not directly supported merely because one event appears before another; if the
+logs show sequence but not causation, mark the causal claim unsupported or require
+the answer to use cautious wording such as "preceded" or "is consistent with".
+Only cite chunk IDs, timestamps, and services that appear in the supplied context.
+Do not mark an answer unsupported merely because it is concise or because it
+contains no factual claim beyond an explicitly supported uncertainty statement.
 """
 
 
@@ -156,6 +162,85 @@ def parse_evidence_verification(raw_output: str) -> EvidenceVerification:
     )
 
 
+def _timestamp_matches_chunk(timestamp: str, chunk: RetrievedChunk) -> bool:
+    """Check that a verifier timestamp belongs to the referenced chunk."""
+
+    candidate = timestamp.strip()
+    if candidate in chunk.content:
+        return True
+
+    # The embedded content uses HH:MM:SS while a verifier may return an ISO
+    # timestamp copied from the chunk header. Accept the time portion when it
+    # is present in the chunk's log lines.
+    if "T" in candidate:
+        time_part = candidate.split("T", 1)[1].split(".", 1)[0]
+        time_part = time_part.rstrip("Z").split("+", 1)[0]
+        if time_part in chunk.content:
+            return True
+
+    return candidate in {
+        chunk.window_start.isoformat(),
+        chunk.window_end.isoformat(),
+    }
+
+
+def validate_evidence_verification(
+    verification: EvidenceVerification,
+    chunks: list[RetrievedChunk],
+    answer: str,
+) -> EvidenceVerification:
+    """Validate verifier references against the actual retrieved chunks.
+
+    The LLM verifier decides whether a claim is semantically supported. This
+    deterministic layer makes sure its references are real references into the
+    context supplied to it, rather than merely plausible-looking identifiers.
+    """
+
+    chunks_by_id = {str(chunk.id): chunk for chunk in chunks}
+    invalid_claims: list[str] = []
+
+    for reference in verification.evidence_references:
+        chunk = chunks_by_id.get(reference.chunk_id)
+        if chunk is None:
+            invalid_claims.append(
+                f"{reference.claim} (references unknown chunk {reference.chunk_id})"
+            )
+            continue
+        if reference.service not in chunk.services:
+            invalid_claims.append(
+                f"{reference.claim} (service {reference.service!r} is not in chunk "
+                f"{reference.chunk_id})"
+            )
+            continue
+        if not _timestamp_matches_chunk(reference.timestamp, chunk):
+            invalid_claims.append(
+                f"{reference.claim} (timestamp {reference.timestamp!r} is not in "
+                f"chunk {reference.chunk_id})"
+            )
+
+    # A non-empty answer with factual content must contain at least one
+    # verifiable reference. Deterministic empty-context answers do not reach
+    # the evidence gate, so this safely catches unsupported LLM answers here.
+    if verification.supported and answer.strip() and not verification.evidence_references:
+        invalid_claims.append(
+            "The answer contains no verifiable evidence reference for its factual claims."
+        )
+
+    if not invalid_claims:
+        return verification
+
+    merged_claims = tuple(dict.fromkeys((*verification.unsupported_claims, *invalid_claims)))
+    reason = verification.reason.strip()
+    validation_reason = "At least one claim failed deterministic evidence-reference validation."
+    reason = f"{reason} {validation_reason}".strip()
+    return replace(
+        verification,
+        supported=False,
+        unsupported_claims=merged_claims,
+        reason=reason,
+    )
+
+
 class EvidenceVerifier:
     """Call the verifier model and validate its structured result."""
 
@@ -195,4 +280,5 @@ class EvidenceVerifier:
                 ),
             }
         )
-        return parse_evidence_verification(raw_output)
+        verification = parse_evidence_verification(raw_output)
+        return validate_evidence_verification(verification, chunks, answer)

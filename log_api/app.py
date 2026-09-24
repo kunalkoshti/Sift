@@ -16,6 +16,10 @@ from pydantic import BaseModel, Field
 from log_api.evidence_gate import EvidenceVerifier
 from log_api.qa import QAChain, deterministic_empty_context_answer
 from log_api.retriever import HybridRetriever, RetrievedChunk, RetrieverConfig
+from log_api.scope_gate import (
+    deterministic_scope_answer,
+    evaluate_scope_gate,
+)
 
 
 ROOT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
@@ -46,6 +50,7 @@ class ApiConfig:
     evidence_model: str | None
     evidence_max_unsupported_claims: int
     evidence_max_retries: int
+    scope_gate_mode: str
     max_context_chars: int
     llm_provider: str
     llm_model: str
@@ -125,6 +130,11 @@ class ApiConfig:
             )
         if not 0 <= evidence_max_retries <= 1:
             raise RuntimeError("SELFRAG_EVIDENCE_MAX_RETRIES must be 0 or 1")
+        scope_gate_mode = os.getenv("SELFRAG_SCOPE_GATE_MODE", "shadow").lower()
+        if scope_gate_mode not in {"off", "shadow", "enforce"}:
+            raise RuntimeError(
+                "SELFRAG_SCOPE_GATE_MODE must be off, shadow, or enforce"
+            )
         if temporal_top_k <= 0:
             raise RuntimeError("TEMPORAL_TOP_K must be positive")
         if max_trace_chunks <= 0:
@@ -167,6 +177,7 @@ class ApiConfig:
             evidence_model=evidence_model,
             evidence_max_unsupported_claims=evidence_max_unsupported_claims,
             evidence_max_retries=evidence_max_retries,
+            scope_gate_mode=scope_gate_mode,
             llm_provider=llm_provider,
             llm_model=required("LLM_MODEL"),
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
@@ -238,6 +249,26 @@ class RAGService:
         await self.retriever.close()
 
     async def ask(self, question: str) -> AskResponse:
+        scope = evaluate_scope_gate(
+            question,
+            mode=self.config.scope_gate_mode,
+        )
+        logger.info(
+            "selfrag_scope_gate mode=%s eligible=%s would_abstain=%s "
+            "category=%s reason=%s",
+            scope.mode,
+            scope.eligible,
+            scope.would_abstain,
+            scope.category,
+            scope.reason,
+        )
+        if scope.enforced_abstention:
+            return AskResponse(
+                answer=deterministic_scope_answer(scope),
+                retrieved_chunks=[],
+                retrieval_note=scope.note,
+            )
+
         retrieval = await self.retriever.retrieve_with_context(question)
         chunks = retrieval.chunks
         if not chunks:
