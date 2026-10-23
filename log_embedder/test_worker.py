@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 
 from log_embedder.worker import (
     collect_max_level,
+    dirty_windows,
     format_content,
     group_records,
     prepare_chunk,
@@ -76,3 +77,20 @@ def test_overflow_is_split_in_timestamp_and_id_order():
     assert [len(group.records) for group in groups] == [2, 2, 1]
     assert [group.sub_index for group in groups] == [0, 1, 2]
     assert [list(group.records)[0]["id"] for group in groups] == [1, 3, 5]
+
+
+def test_dirty_windows_deduplicate_trace_and_noise_work_units():
+    records = [
+        _record(1, "2025-12-31T23:58:01", "trace-a"),
+        _record(2, "2025-12-31T23:58:02", "trace-a"),
+        _record(3, "2025-12-31T23:58:03"),
+        _record(4, "2025-12-31T23:59:03"),
+    ]
+
+    windows = dirty_windows(records, window_seconds=60)
+
+    assert [(window.trace_id, window.window_start.isoformat()) for window in windows] == [
+        (None, "2025-12-31T23:58:00+00:00"),
+        ("trace-a", "2025-12-31T23:58:00+00:00"),
+        (None, "2025-12-31T23:59:00+00:00"),
+    ]

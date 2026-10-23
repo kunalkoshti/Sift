@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import random
@@ -204,6 +204,43 @@ def _generate_noise(
         )
     records.sort(key=lambda record: record.timestamp)
     return records
+
+
+def generate_live_record(
+    context: GenerationContext,
+    service_catalog: dict[str, dict[str, Any]],
+    *,
+    timestamp: datetime | None = None,
+) -> LogRecord:
+    """Generate one current-time noise record for the continuous producer."""
+
+    service = context.rng.choice(tuple(service_catalog.values()))
+    category = _choose_category(context.rng, service)
+    template = context.rng.choice(service[f"{category}_messages"])
+    message, values = _render_template(
+        template,
+        rng=context.rng,
+        category=category,
+        service_name=service["name"],
+    )
+    event_timestamp = timestamp or datetime.now(timezone.utc)
+    if event_timestamp.tzinfo is None or event_timestamp.utcoffset() is None:
+        raise ValueError("live record timestamp must be timezone-aware")
+
+    return LogRecord(
+        schema_version=SCHEMA_VERSION,
+        timestamp=event_timestamp.astimezone(timezone.utc),
+        level=CATEGORY_LEVELS[category],
+        service=service["name"],
+        host=service["host"],
+        message=message,
+        trace_id=None,
+        metadata={
+            "source": "live-template-noise",
+            "template_category": category,
+            "template_values": values,
+        },
+    )
 
 
 def generate_event_stream(

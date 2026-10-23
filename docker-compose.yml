@@ -121,6 +121,31 @@ services:
       CHUNK_WINDOW_SECONDS: ${CHUNK_WINDOW_SECONDS}
       EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE}
       MAX_RECORDS_PER_CHUNK: ${MAX_RECORDS_PER_CHUNK}
+      EMBEDDER_MODE: ${EMBEDDER_MODE:-batch}
+      EMBEDDER_POLL_SECONDS: ${EMBEDDER_POLL_SECONDS:-10}
+      EMBEDDER_WORKER_NAME: ${EMBEDDER_WORKER_NAME:-embedder-1}
+      HF_HOME: /root/.cache/huggingface
+      LOG_LEVEL: ${LOG_LEVEL}
+    volumes:
+      - model-cache:/root/.cache/huggingface
+
+  log-embedder-live:
+    build:
+      context: .
+      dockerfile: log_embedder/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_DSN: postgresql://sift:sift@postgres:5432/sift
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      CHUNK_WINDOW_SECONDS: ${CHUNK_WINDOW_SECONDS}
+      EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE}
+      MAX_RECORDS_PER_CHUNK: ${MAX_RECORDS_PER_CHUNK}
+      EMBEDDER_MODE: live
+      EMBEDDER_POLL_SECONDS: ${EMBEDDER_POLL_SECONDS:-10}
+      EMBEDDER_WORKER_NAME: ${EMBEDDER_WORKER_NAME:-live-embedder}
       HF_HOME: /root/.cache/huggingface
       LOG_LEVEL: ${LOG_LEVEL}
     volumes:

@@ -42,6 +42,12 @@ CREATE INDEX IF NOT EXISTS chunks_embedding_idx
 CREATE INDEX IF NOT EXISTS chunks_window_idx
   ON chunks (window_start, window_end);
 
+CREATE TABLE IF NOT EXISTS embedder_state (
+  worker_name TEXT PRIMARY KEY,
+  last_raw_log_id BIGINT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Existing databases may already have chunks without the severity summary.
 ALTER TABLE chunks
   ADD COLUMN IF NOT EXISTS max_level TEXT;
