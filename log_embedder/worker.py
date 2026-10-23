@@ -27,6 +27,36 @@ FROM raw_logs
 ORDER BY timestamp, id
 """
 
+RAW_LOGS_AFTER_SQL = """
+SELECT id, timestamp, level, service, message, trace_id
+FROM raw_logs
+WHERE id > $1
+ORDER BY id
+"""
+
+RAW_LOGS_WINDOW_SQL = """
+SELECT id, timestamp, level, service, message, trace_id
+FROM raw_logs
+WHERE trace_id IS NOT DISTINCT FROM $1::text
+  AND timestamp >= $2
+  AND timestamp < $3
+ORDER BY timestamp, id
+"""
+
+CHECKPOINT_SQL = """
+SELECT last_raw_log_id
+FROM embedder_state
+WHERE worker_name = $1
+"""
+
+UPSERT_CHECKPOINT_SQL = """
+INSERT INTO embedder_state (worker_name, last_raw_log_id, updated_at)
+VALUES ($1, $2, now())
+ON CONFLICT (worker_name) DO UPDATE SET
+  last_raw_log_id = EXCLUDED.last_raw_log_id,
+  updated_at = now()
+"""
+
 INSERT_CHUNK_SQL = """
 INSERT INTO chunks (
   chunk_type,
@@ -61,6 +91,9 @@ class EmbedderConfig:
     window_seconds: int
     max_records_per_chunk: int
     embed_batch_size: int
+    mode: str
+    poll_seconds: float
+    worker_name: str
 
     @classmethod
     def from_env(cls) -> EmbedderConfig:
@@ -70,12 +103,27 @@ class EmbedderConfig:
                 raise RuntimeError(f"{name} must be configured in .env or the environment")
             return value
 
+        mode = os.getenv("EMBEDDER_MODE", "batch").strip().lower()
+        if mode not in {"batch", "live"}:
+            raise RuntimeError("EMBEDDER_MODE must be 'batch' or 'live'")
+
+        poll_seconds = float(os.getenv("EMBEDDER_POLL_SECONDS", "10"))
+        if poll_seconds <= 0:
+            raise RuntimeError("EMBEDDER_POLL_SECONDS must be positive")
+
+        worker_name = os.getenv("EMBEDDER_WORKER_NAME", "embedder-1").strip()
+        if not worker_name:
+            raise RuntimeError("EMBEDDER_WORKER_NAME must not be empty")
+
         return cls(
             postgres_dsn=required("POSTGRES_DSN"),
             model_name=required("EMBEDDING_MODEL"),
             window_seconds=int(required("CHUNK_WINDOW_SECONDS")),
             max_records_per_chunk=int(required("MAX_RECORDS_PER_CHUNK")),
             embed_batch_size=int(required("EMBED_BATCH_SIZE")),
+            mode=mode,
+            poll_seconds=poll_seconds,
+            worker_name=worker_name,
         )
 
 
@@ -98,6 +146,12 @@ class PreparedChunk:
     max_level: str
     content: str
     raw_log_ids: list[int]
+
+
+@dataclass(frozen=True)
+class DirtyWindow:
+    trace_id: str | None
+    window_start: datetime
 
 
 def utc_timestamp(value: datetime) -> datetime:
@@ -282,6 +336,101 @@ async def load_raw_logs(pool: asyncpg.Pool) -> list[asyncpg.Record]:
         return list(await connection.fetch(RAW_LOGS_SQL))
 
 
+async def load_raw_logs_after(
+    pool: asyncpg.Pool,
+    last_raw_log_id: int,
+) -> list[asyncpg.Record]:
+    async with pool.acquire() as connection:
+        return list(await connection.fetch(RAW_LOGS_AFTER_SQL, last_raw_log_id))
+
+
+async def load_raw_logs_for_window(
+    pool: asyncpg.Pool,
+    dirty_window: DirtyWindow,
+    window_seconds: int,
+) -> list[asyncpg.Record]:
+    window_start = utc_timestamp(dirty_window.window_start)
+    window_end = window_start + timedelta(seconds=window_seconds)
+    async with pool.acquire() as connection:
+        return list(
+            await connection.fetch(
+                RAW_LOGS_WINDOW_SQL,
+                dirty_window.trace_id,
+                window_start,
+                window_end,
+            )
+        )
+
+
+def dirty_windows(
+    records: Iterable[Any],
+    *,
+    window_seconds: int,
+) -> list[DirtyWindow]:
+    if window_seconds <= 0:
+        raise ValueError("window_seconds must be positive")
+
+    windows = {
+        DirtyWindow(
+            trace_id=record["trace_id"],
+            window_start=fixed_window_start(record["timestamp"], window_seconds),
+        )
+        for record in records
+    }
+    return sorted(
+        windows,
+        key=lambda value: (
+            value.window_start,
+            value.trace_id is not None,
+            value.trace_id or "",
+        ),
+    )
+
+
+async def load_checkpoint(pool: asyncpg.Pool, worker_name: str) -> int:
+    async with pool.acquire() as connection:
+        value = await connection.fetchval(CHECKPOINT_SQL, worker_name)
+    return int(value or 0)
+
+
+async def save_checkpoint(
+    pool: asyncpg.Pool,
+    worker_name: str,
+    last_raw_log_id: int,
+) -> None:
+    async with pool.acquire() as connection:
+        await connection.execute(UPSERT_CHECKPOINT_SQL, worker_name, last_raw_log_id)
+
+
+async def insert_chunks(
+    connection: asyncpg.Connection,
+    chunks: Sequence[PreparedChunk],
+    embeddings: Sequence[str],
+    batch_size: int,
+) -> None:
+    for offset in range(0, len(chunks), batch_size):
+        chunk_batch = chunks[offset : offset + batch_size]
+        embedding_batch = embeddings[offset : offset + batch_size]
+        await connection.executemany(
+            INSERT_CHUNK_SQL,
+            [
+                (
+                    chunk.chunk_type,
+                    chunk.window_start,
+                    chunk.window_end,
+                    chunk.sub_index,
+                    chunk.services,
+                    chunk.trace_ids,
+                    chunk.max_level,
+                    chunk.content,
+                    embedding,
+                    chunk.raw_log_ids,
+                )
+                for chunk, embedding in zip(chunk_batch, embedding_batch)
+            ],
+        )
+
+
 async def replace_chunks(
     pool: asyncpg.Pool,
     chunks: Sequence[PreparedChunk],
@@ -294,27 +443,43 @@ async def replace_chunks(
     async with pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute("TRUNCATE TABLE chunks")
-            for offset in range(0, len(chunks), batch_size):
-                chunk_batch = chunks[offset : offset + batch_size]
-                embedding_batch = embeddings[offset : offset + batch_size]
-                await connection.executemany(
-                    INSERT_CHUNK_SQL,
-                    [
-                        (
-                            chunk.chunk_type,
-                            chunk.window_start,
-                            chunk.window_end,
-                            chunk.sub_index,
-                            chunk.services,
-                            chunk.trace_ids,
-                            chunk.max_level,
-                            chunk.content,
-                            embedding,
-                            chunk.raw_log_ids,
-                        )
-                        for chunk, embedding in zip(chunk_batch, embedding_batch)
-                    ],
-                )
+            await insert_chunks(connection, chunks, embeddings, batch_size)
+
+
+async def replace_dirty_window(
+    pool: asyncpg.Pool,
+    model: Any,
+    config: EmbedderConfig,
+    dirty_window: DirtyWindow,
+) -> tuple[int, int]:
+    records = await load_raw_logs_for_window(
+        pool,
+        dirty_window,
+        config.window_seconds,
+    )
+    if not records:
+        return 0, 0
+
+    chunks = [
+        prepare_chunk(group)
+        for group in group_records(
+            records,
+            window_seconds=config.window_seconds,
+            max_records_per_chunk=config.max_records_per_chunk,
+        )
+    ]
+    embeddings = embed_chunks(model, chunks, config.embed_batch_size)
+    raw_log_ids = [record["id"] for record in records]
+
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "DELETE FROM chunks WHERE raw_log_ids && $1::bigint[]",
+                raw_log_ids,
+            )
+            await insert_chunks(connection, chunks, embeddings, config.embed_batch_size)
+
+    return len(records), len(chunks)
 
 
 async def run(config: EmbedderConfig | None = None) -> int:
@@ -346,12 +511,68 @@ async def run(config: EmbedderConfig | None = None) -> int:
         await pool.close()
 
 
+async def run_live(config: EmbedderConfig | None = None) -> None:
+    """Continuously embed only trace/window groups affected by new raw logs."""
+
+    config = config or EmbedderConfig.from_env()
+    pool = await asyncpg.create_pool(config.postgres_dsn)
+    model = None
+    try:
+        await ensure_database_schema(pool)
+        logger.info(
+            "live embedder started worker=%s poll_seconds=%s",
+            config.worker_name,
+            config.poll_seconds,
+        )
+        while True:
+            last_raw_log_id = await load_checkpoint(pool, config.worker_name)
+            new_records = await load_raw_logs_after(pool, last_raw_log_id)
+            if new_records:
+                if model is None:
+                    logger.info("loading embedding model %s", config.model_name)
+                    model = load_embedding_model(config.model_name)
+
+                windows = dirty_windows(
+                    new_records,
+                    window_seconds=config.window_seconds,
+                )
+                total_records = 0
+                total_chunks = 0
+                for window in windows:
+                    records_count, chunks_count = await replace_dirty_window(
+                        pool,
+                        model,
+                        config,
+                        window,
+                    )
+                    total_records += records_count
+                    total_chunks += chunks_count
+
+                newest_id = max(record["id"] for record in new_records)
+                await save_checkpoint(pool, config.worker_name, newest_id)
+                logger.info(
+                    "embedded %d new raw logs across %d dirty windows; refreshed %d chunks; cursor=%d",
+                    len(new_records),
+                    len(windows),
+                    total_chunks,
+                    newest_id,
+                )
+
+            await asyncio.sleep(config.poll_seconds)
+    finally:
+        await pool.close()
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.getenv("LOG_LEVEL", "INFO"),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    asyncio.run(run())
+    config = EmbedderConfig.from_env()
+    if config.mode == "live":
+        asyncio.run(run_live(config))
+    else:
+        asyncio.run(run(config))
 
 
 if __name__ == "__main__":
