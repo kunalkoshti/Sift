@@ -67,3 +67,54 @@ def test_blank_question_is_rejected():
     response = asyncio.run(exercise())
 
     assert response.status_code == 422
+
+
+def test_cors_allows_configured_frontend_origin(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGINS", "https://frontend.example")
+
+    async def exercise() -> httpx.Response:
+        app = create_app(FakeRAGService())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.options(
+                    "/ask",
+                    headers={
+                        "Origin": "https://frontend.example",
+                        "Access-Control-Request-Method": "POST",
+                        "Access-Control-Request-Headers": "content-type",
+                    },
+                )
+
+    response = asyncio.run(exercise())
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://frontend.example"
+
+
+def test_cors_does_not_allow_unconfigured_origin(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGINS", "https://frontend.example")
+
+    async def exercise() -> httpx.Response:
+        app = create_app(FakeRAGService())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return await client.options(
+                    "/ask",
+                    headers={
+                        "Origin": "https://other.example",
+                        "Access-Control-Request-Method": "POST",
+                        "Access-Control-Request-Headers": "content-type",
+                    },
+                )
+
+    response = asyncio.run(exercise())
+
+    assert "access-control-allow-origin" not in response.headers

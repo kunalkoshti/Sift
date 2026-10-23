@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir ".[log_api]"
 
 ENV PYTHONUNBUFFERED=1
 
-CMD ["uvicorn", "log_api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn log_api.app:app --host 0.0.0.0 --port ${PORT:-8000}"]
