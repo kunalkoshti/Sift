@@ -11,6 +11,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from log_api.evidence_gate import EvidenceVerifier
@@ -26,6 +27,26 @@ ROOT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(ROOT_ENV_FILE)
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+)
+
+
+def configured_cors_origins() -> list[str]:
+    """Return explicitly configured browser origins for the API."""
+
+    raw_origins = os.getenv("CORS_ORIGINS")
+    if raw_origins is None:
+        return list(DEFAULT_CORS_ORIGINS)
+
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    if not origins:
+        raise RuntimeError("CORS_ORIGINS must contain at least one origin")
+    if "*" in origins:
+        raise RuntimeError("CORS_ORIGINS must not use the wildcard '*'")
+    return origins
 
 
 @dataclass(frozen=True)
@@ -381,6 +402,13 @@ def create_app(service: Any | None = None) -> FastAPI:
         description="Hybrid retrieval, reranking, and context-grounded question answering.",
         version="0.1.0",
         lifespan=lifespan,
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=configured_cors_origins(),
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type"],
     )
 
     @app.get("/health")
