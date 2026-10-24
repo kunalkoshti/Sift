@@ -51,6 +51,7 @@ class ConsumerConfig:
     count: int
     block_ms: int
     group_start_id: str
+    run_once: bool
 
     @classmethod
     def from_env(cls) -> ConsumerConfig:
@@ -69,6 +70,8 @@ class ConsumerConfig:
             count=int(required("REDIS_READ_COUNT")),
             block_ms=int(required("REDIS_BLOCK_MS")),
             group_start_id=required("REDIS_GROUP_START_ID"),
+            run_once=os.getenv("CONSUMER_RUN_ONCE", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
 
 
@@ -167,6 +170,27 @@ async def read_and_process(
     return processed
 
 
+async def run_once(
+    redis: Redis,
+    pool: asyncpg.Pool,
+    config: ConsumerConfig,
+) -> int:
+    """Drain currently available pending and new entries, then return."""
+
+    processed = await read_and_process(redis, pool, config, "0", block_ms=None)
+    while True:
+        batch_processed = await read_and_process(
+            redis,
+            pool,
+            config,
+            ">",
+            block_ms=None,
+        )
+        processed += batch_processed
+        if batch_processed == 0:
+            return processed
+
+
 async def run(config: ConsumerConfig | None = None) -> None:
     config = config or ConsumerConfig.from_env()
     redis = from_url(config.redis_url, decode_responses=True)
@@ -174,6 +198,11 @@ async def run(config: ConsumerConfig | None = None) -> None:
     try:
         await ensure_database_schema(pool)
         await ensure_consumer_group(redis, config)
+
+        if config.run_once:
+            processed = await run_once(redis, pool, config)
+            logger.info("one-shot consumer processed %d records", processed)
+            return
 
         # Reclaim entries pending for this stable consumer name after a restart.
         # A missing block value makes this a non-blocking drain. Redis treats

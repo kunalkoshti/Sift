@@ -54,6 +54,7 @@ def test_consumer_config_reads_environment(monkeypatch):
     monkeypatch.setenv("REDIS_STREAM", "test-stream")
     monkeypatch.setenv("REDIS_GROUP", "test-group")
     monkeypatch.setenv("REDIS_CONSUMER", "test-consumer")
+    monkeypatch.setenv("CONSUMER_RUN_ONCE", "true")
 
     config = ConsumerConfig.from_env()
 
@@ -62,3 +63,4 @@ def test_consumer_config_reads_environment(monkeypatch):
     assert config.stream == "test-stream"
     assert config.group == "test-group"
     assert config.consumer == "test-consumer"
+    assert config.run_once is True
