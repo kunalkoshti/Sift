@@ -80,6 +80,26 @@ WHERE $1 = ANY(trace_ids)
 ORDER BY window_start, sub_index, id
 """
 
+LOG_LEVEL_INTERVALS_SQL = """
+WITH bucketed_logs AS (
+  SELECT
+    date_trunc('minute', timestamp) AS interval_start,
+    upper(level) AS level
+  FROM raw_logs
+)
+SELECT
+  interval_start,
+  interval_start + INTERVAL '1 minute' AS interval_end,
+  count(*) FILTER (WHERE level = 'INFO')::int AS info,
+  count(*) FILTER (WHERE level = 'WARN')::int AS warn,
+  count(*) FILTER (WHERE level = 'ERROR')::int AS error,
+  count(*) FILTER (WHERE level = 'CRITICAL')::int AS critical,
+  count(*)::int AS total
+FROM bucketed_logs
+GROUP BY interval_start
+ORDER BY interval_start
+"""
+
 
 class RetrievedChunk(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -106,6 +126,8 @@ class RetrieverConfig:
     postgres_dsn: str
     embedding_model: str
     top_k: int
+    db_pool_min_size: int = 1
+    db_pool_max_size: int = 3
     retrieval_mode: str = "hybrid"
     candidate_k: int = 20
     trace_candidate_k: int = 20
@@ -406,7 +428,20 @@ class HybridRetriever:
         if not -1.0 <= self.config.min_dense_similarity <= 1.0:
             raise RuntimeError("min_dense_similarity must be between -1 and 1")
 
-        self.pool = await asyncpg.create_pool(self.config.postgres_dsn)
+        if self.config.db_pool_min_size < 0:
+            raise RuntimeError("db_pool_min_size must be non-negative")
+        if self.config.db_pool_max_size <= 0:
+            raise RuntimeError("db_pool_max_size must be positive")
+        if self.config.db_pool_max_size < self.config.db_pool_min_size:
+            raise RuntimeError(
+                "db_pool_max_size must be greater than or equal to db_pool_min_size"
+            )
+
+        self.pool = await asyncpg.create_pool(
+            self.config.postgres_dsn,
+            min_size=self.config.db_pool_min_size,
+            max_size=self.config.db_pool_max_size,
+        )
         async with self.pool.acquire() as connection:
             anchor = await connection.fetchval("SELECT MAX(window_end) FROM chunks")
         self.corpus_time_anchor = (
@@ -441,6 +476,46 @@ class HybridRetriever:
 
         result = await self.retrieve_with_context(question, top_k=top_k)
         return result.chunks
+
+    async def log_level_stats(self) -> dict[str, Any]:
+        """Return level counts for every non-empty minute in the corpus."""
+
+        if self.pool is None:
+            raise RuntimeError("retriever has not been started")
+
+        async with self.pool.acquire() as connection:
+            summary = await connection.fetchrow(
+                """
+                SELECT
+                  count(*)::int AS raw_logs,
+                  (SELECT count(*)::int FROM chunks WHERE embedding IS NOT NULL)
+                    AS embedded_chunks,
+                  max(received_at) AS last_indexed
+                FROM raw_logs
+                """
+            )
+            intervals = await connection.fetch(LOG_LEVEL_INTERVALS_SQL)
+
+        return {
+            "status": "ready" if summary["raw_logs"] else "empty",
+            "last_indexed": summary["last_indexed"],
+            "raw_logs": summary["raw_logs"],
+            "embedded_chunks": summary["embedded_chunks"],
+            "intervals": [
+                {
+                    "start": row["interval_start"],
+                    "end": row["interval_end"],
+                    "counts": {
+                        "INFO": row["info"],
+                        "WARN": row["warn"],
+                        "ERROR": row["error"],
+                        "CRITICAL": row["critical"],
+                    },
+                    "total": row["total"],
+                }
+                for row in intervals
+            ],
+        }
 
     async def retrieve_with_context(
         self,

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_CORS_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
 )
 
 
@@ -52,6 +55,8 @@ def configured_cors_origins() -> list[str]:
 @dataclass(frozen=True)
 class ApiConfig:
     postgres_dsn: str
+    db_pool_min_size: int
+    db_pool_max_size: int
     embedding_model: str
     top_k: int
     retrieval_mode: str
@@ -91,6 +96,16 @@ class ApiConfig:
         top_k = int(required("RETRIEVAL_TOP_K"))
         if top_k <= 0:
             raise RuntimeError("RETRIEVAL_TOP_K must be positive")
+        db_pool_min_size = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+        db_pool_max_size = int(os.getenv("DB_POOL_MAX_SIZE", "3"))
+        if db_pool_min_size < 0:
+            raise RuntimeError("DB_POOL_MIN_SIZE must be non-negative")
+        if db_pool_max_size <= 0:
+            raise RuntimeError("DB_POOL_MAX_SIZE must be positive")
+        if db_pool_max_size < db_pool_min_size:
+            raise RuntimeError(
+                "DB_POOL_MAX_SIZE must be greater than or equal to DB_POOL_MIN_SIZE"
+            )
         retrieval_mode = os.getenv("RETRIEVAL_MODE", "hybrid").lower()
         if retrieval_mode not in {"dense", "hybrid"}:
             raise RuntimeError("RETRIEVAL_MODE must be either 'dense' or 'hybrid'")
@@ -175,6 +190,8 @@ class ApiConfig:
 
         return cls(
             postgres_dsn=required("POSTGRES_DSN"),
+            db_pool_min_size=db_pool_min_size,
+            db_pool_max_size=db_pool_max_size,
             embedding_model=required("EMBEDDING_MODEL"),
             top_k=top_k,
             retrieval_mode=retrieval_mode,
@@ -234,6 +251,72 @@ class AskResponse(BaseModel):
     answer: str
     retrieved_chunks: list[RetrievedChunk]
     retrieval_note: str | None = None
+    response_type: Literal[
+        "supported",
+        "ambiguous",
+        "fallback",
+        "no_correlated_incident",
+        "out_of_scope",
+        "empty_retrieval",
+        "abstain",
+    ] = "supported"
+
+
+class LogLevelInterval(BaseModel):
+    start: datetime
+    end: datetime
+    counts: dict[Literal["INFO", "WARN", "ERROR", "CRITICAL"], int]
+    total: int
+
+
+class LogLevelStatsResponse(BaseModel):
+    status: Literal["ready", "empty"]
+    last_indexed: datetime | None = None
+    raw_logs: int
+    embedded_chunks: int
+    intervals: list[LogLevelInterval]
+
+
+def classify_response_type(
+    *,
+    scope_in_scope: bool,
+    chunks: list[RetrievedChunk],
+    retrieval_note: str | None,
+) -> Literal[
+    "supported",
+    "ambiguous",
+    "fallback",
+    "no_correlated_incident",
+    "out_of_scope",
+    "empty_retrieval",
+    "abstain",
+]:
+    """Classify the API result for clients without parsing generated prose."""
+
+    if not scope_in_scope:
+        return "out_of_scope"
+
+    normalized = (retrieval_note or "").casefold()
+    if "confidence was below" in normalized:
+        return "abstain"
+    if "no chunks found in the requested time range" in normalized:
+        return "fallback"
+    if (
+        "no correlated incident" in normalized
+        or "no incident trace" in normalized
+        or "none belonged to a correlated incident trace" in normalized
+        or "no chunks were found for the requested service" in normalized
+    ):
+        return "no_correlated_incident"
+    if not chunks:
+        return "empty_retrieval"
+    if (
+        "multiple incident traces" in normalized
+        or "two incident traces" in normalized
+        or "incident traces were detected" in normalized
+    ):
+        return "ambiguous"
+    return "supported"
 
 
 class RAGService:
@@ -242,6 +325,8 @@ class RAGService:
         self.retriever = HybridRetriever(
             RetrieverConfig(
                 postgres_dsn=config.postgres_dsn,
+                db_pool_min_size=config.db_pool_min_size,
+                db_pool_max_size=config.db_pool_max_size,
                 embedding_model=config.embedding_model,
                 top_k=config.top_k,
                 retrieval_mode=config.retrieval_mode,
@@ -269,6 +354,11 @@ class RAGService:
     async def close(self) -> None:
         await self.retriever.close()
 
+    async def log_level_stats(self) -> dict[str, Any]:
+        """Return corpus-wide log-level statistics for the frontend dashboard."""
+
+        return await self.retriever.log_level_stats()
+
     async def ask(self, question: str) -> AskResponse:
         scope = evaluate_scope_gate(
             question,
@@ -288,10 +378,16 @@ class RAGService:
                 answer=deterministic_scope_answer(scope),
                 retrieved_chunks=[],
                 retrieval_note=scope.note,
+                response_type="out_of_scope",
             )
 
         retrieval = await self.retriever.retrieve_with_context(question)
         chunks = retrieval.chunks
+        response_type = classify_response_type(
+            scope_in_scope=scope.in_scope,
+            chunks=chunks,
+            retrieval_note=retrieval.note,
+        )
         if not chunks:
             answer = deterministic_empty_context_answer(retrieval.note)
         else:
@@ -371,6 +467,7 @@ class RAGService:
                             "for a reliable answer, so I cannot answer this safely "
                             "from the available evidence."
                         )
+                        response_type = "abstain"
                 except Exception:
                     # A verifier outage must not take down the QA endpoint. The
                     # failure is visible in logs and the original answer is kept.
@@ -379,6 +476,7 @@ class RAGService:
             answer=answer,
             retrieved_chunks=chunks,
             retrieval_note=retrieval.note,
+            response_type=response_type,
         )
 
 
@@ -414,6 +512,18 @@ def create_app(service: Any | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/stats/log-levels", response_model=LogLevelStatsResponse)
+    async def log_level_stats() -> LogLevelStatsResponse:
+        try:
+            return LogLevelStatsResponse(
+                **await app.state.rag_service.log_level_stats()
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Log-level stats request failed")
+            raise HTTPException(status_code=502, detail="Stats request failed") from exc
 
     @app.post("/ask", response_model=AskResponse)
     async def ask(request: AskRequest) -> AskResponse:
