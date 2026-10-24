@@ -1,0 +1,41 @@
+name: Generate live logs
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: live-log-producer
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install generator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[log_generator]"
+
+      - name: Generate and send live logs
+        env:
+          COLLECTOR_URL: ${{ secrets.COLLECTOR_URL }}
+        run: |
+          test -n "$COLLECTOR_URL"
+          python -m log_generator.live_producer \
+            --collector-url "$COLLECTOR_URL" \
+            --seed "${{ github.run_number }}" \
+            --batch-size 5 \
+            --interval-seconds 1 \
+            --max-batches 1
