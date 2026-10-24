@@ -31,8 +31,10 @@ jobs:
       - name: Generate and send live logs
         env:
           COLLECTOR_URL: ${{ secrets.COLLECTOR_URL }}
+          GENERATOR_BASE_TIMESTAMP: ${{ vars.GENERATOR_BASE_TIMESTAMP || '2026-01-01T00:00:00+00:00' }}
         run: |
           test -n "$COLLECTOR_URL"
+          test -n "$GENERATOR_BASE_TIMESTAMP"
           python -m log_generator.live_producer \
             --collector-url "$COLLECTOR_URL" \
             --seed "${{ github.run_number }}" \
