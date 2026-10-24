@@ -181,6 +181,46 @@ curl -s -X POST http://localhost:8001/ask \
 
 Ollama is optional and runs only with the local-llm Compose profile. Remote providers can be used to avoid loading a local generation model into device memory.
 
+## Deployment automation
+
+GitHub Actions runs the full backend test suite, validates Docker Compose, and builds
+the frontend on every push and pull request. Production deployment is restricted to
+successful pushes to `main`:
+
+- changes under `frontend/` deploy the Vite app to Vercel;
+- changes under `log_api/`, `sift_common/`, `db/schema.sql`, or deployment
+  configuration deploy `log-api` to Cloud Run;
+- a commit touching both areas deploys both services.
+
+The API deployment updates `CORS_ORIGINS` using the stable Vercel production URL.
+The frontend reads `VITE_API_URL` from the Vercel Production environment during its
+build, so the API URL is not committed to the repository.
+
+Configure these GitHub repository variables:
+
+~~~text
+GCP_PROJECT_ID
+GCP_REGION
+ARTIFACT_REPOSITORY       # optional; defaults to sift
+LOG_API_SERVICE           # optional; defaults to sift-log-api
+VERCEL_FRONTEND_URL       # stable https://...vercel.app production URL
+~~~
+
+Configure these GitHub Actions secrets:
+
+~~~text
+GCP_WORKLOAD_IDENTITY_PROVIDER
+GCP_SERVICE_ACCOUNT
+VERCEL_TOKEN
+VERCEL_ORG_ID
+VERCEL_PROJECT_ID
+~~~
+
+The Vercel project should use `frontend` as its root directory and have
+`VITE_API_URL` configured for the Production environment. The Cloud Run service must
+already have its runtime settings and secrets, including `POSTGRES_DSN`, `LLM_MODEL`,
+and the LLM API key.
+
 ## Evaluation
 
 The current filter-retrieval evaluation uses the frozen 32-question file:

@@ -4,7 +4,37 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
+  changes:
+    name: Detect deployable changes
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+      api: ${{ steps.filter.outputs.api }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Detect changed areas
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+            api:
+              - 'log_api/**'
+              - 'sift_common/**'
+              - 'db/schema.sql'
+              - 'pyproject.toml'
+              - 'cloudbuild.yaml'
+              - '.env.example'
+
   test:
     runs-on: ubuntu-latest
 
@@ -39,3 +69,134 @@ jobs:
           log_generator
           log_api
           -q
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  deploy-api:
+    name: Deploy log-api to Cloud Run
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.api == 'true'
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REPOSITORY || 'sift' }}
+      LOG_API_SERVICE: ${{ vars.LOG_API_SERVICE || 'sift-log-api' }}
+      VERCEL_FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate deployment configuration
+        run: |
+          test -n "${GCP_PROJECT_ID}"
+          test -n "${GCP_REGION}"
+          test -n "${VERCEL_FRONTEND_URL}"
+          test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}"
+
+      - name: Build and push log-api image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          export IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/log-api:${IMAGE_TAG}"
+          gcloud builds submit \
+            --project "${GCP_PROJECT_ID}" \
+            --config cloudbuild.yaml \
+            --substitutions="_IMAGE=${IMAGE}" \
+            .
+          echo "LOG_API_IMAGE=${IMAGE}" >> "${GITHUB_ENV}"
+
+      - name: Deploy log-api
+        run: |
+          gcloud run deploy "${LOG_API_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --platform managed \
+            --image "${LOG_API_IMAGE}" \
+            --port 8080 \
+            --max 1 \
+            --allow-unauthenticated \
+            --quiet
+
+      - name: Set API CORS for the Vercel production URL
+        run: |
+          gcloud run services update "${LOG_API_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --update-env-vars="CORS_ORIGINS=${VERCEL_FRONTEND_URL}" \
+            --quiet
+
+      - name: Check deployed API
+        run: |
+          API_URL="$(gcloud run services describe "${LOG_API_SERVICE}" \
+            --project "${GCP_PROJECT_ID}" \
+            --region "${GCP_REGION}" \
+            --format='value(status.url)')"
+          curl --fail --silent --show-error "${API_URL}/health"
+
+  deploy-frontend:
+    name: Deploy frontend to Vercel
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.frontend == 'true'
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+
+    env:
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Validate Vercel configuration
+        run: |
+          test -n "${VERCEL_ORG_ID}"
+          test -n "${VERCEL_PROJECT_ID}"
+          test -n "${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Pull Vercel production environment
+        working-directory: frontend
+        run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Build Vercel production artifacts
+        working-directory: frontend
+        run: vercel build --prod --token="${{ secrets.VERCEL_TOKEN }}"
+
+      - name: Deploy Vercel production artifacts
+        working-directory: frontend
+        run: vercel deploy --prebuilt --prod --token="${{ secrets.VERCEL_TOKEN }}"
