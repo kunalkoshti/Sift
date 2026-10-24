@@ -126,11 +126,16 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         run: |
           export IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/log-api:${IMAGE_TAG}"
-          gcloud builds submit \
-            --project "${GCP_PROJECT_ID}" \
-            --config cloudbuild.yaml \
-            --substitutions="_IMAGE=${IMAGE}" \
+
+          # Build on the GitHub runner and push directly to Artifact Registry.
+          # This avoids gcloud builds submit uploading source to the
+          # project Cloud Build staging bucket.
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+          docker build \
+            --file log_api/Dockerfile \
+            --tag "${IMAGE}" \
             .
+          docker push "${IMAGE}"
           echo "LOG_API_IMAGE=${IMAGE}" >> "${GITHUB_ENV}"
 
       - name: Deploy log-api
