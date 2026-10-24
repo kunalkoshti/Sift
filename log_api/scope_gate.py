@@ -51,6 +51,25 @@ _OUT_OF_SCOPE_RULES: tuple[tuple[str, str, re.Pattern[str]], ...] = (
             re.IGNORECASE,
         ),
     ),
+    (
+        "payment_method",
+        "payment methods and card acceptance are not recorded in application logs",
+        re.compile(
+            r"\b(?:credit|debit)\s+cards?\b|"
+            r"\bpayment\s+methods?\b|"
+            r"\baccept(?:ed|s)?\s+(?:credit|debit)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "unsupported_workflow",
+        "external ordering workflows are not present in application logs",
+        re.compile(
+            r"\b(?:burger|restaurant|food delivery|recipe)\b|"
+            r"\bhow\s+to\s+order\b",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 

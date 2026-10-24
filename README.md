@@ -2,7 +2,7 @@
 
 Sift is a structured-log ingestion and RAG system for investigating application incidents.
 
-> **Status:** actively under development. The batch pipeline works end to end. Live incremental embedding and production hardening are not implemented yet.
+> **Status:** actively under development. The ingestion, live incremental embedding, retrieval API, evaluation harness, and React frontend are working. Production deployment is still being hardened.
 
 ## Architecture
 

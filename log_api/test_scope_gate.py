@@ -22,6 +22,8 @@ from log_api.scope_gate import (
             "What percentage of payment attempts failed last night?",
             "aggregate_business_statistic",
         ),
+        ("Can I pay using credit cards?", "payment_method"),
+        ("How do I order a burger?", "unsupported_workflow"),
     ],
 )
 def test_clearly_out_of_scope_questions_are_detected(question, category):
