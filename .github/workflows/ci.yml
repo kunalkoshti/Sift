@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -85,7 +86,9 @@ jobs:
 
   deploy-api:
     name: Deploy log-api to Cloud Run
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.api == 'true'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.api == 'true')
     needs: [changes, test]
     runs-on: ubuntu-latest
 
