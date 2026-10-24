@@ -94,6 +94,7 @@ class EmbedderConfig:
     mode: str
     poll_seconds: float
     worker_name: str
+    run_once: bool
 
     @classmethod
     def from_env(cls) -> EmbedderConfig:
@@ -124,6 +125,8 @@ class EmbedderConfig:
             mode=mode,
             poll_seconds=poll_seconds,
             worker_name=worker_name,
+            run_once=os.getenv("EMBEDDER_RUN_ONCE", "false").strip().lower()
+            in {"1", "true", "yes", "on"},
         )
 
 
@@ -557,6 +560,10 @@ async def run_live(config: EmbedderConfig | None = None) -> None:
                     total_chunks,
                     newest_id,
                 )
+
+            if config.run_once:
+                logger.info("one-shot live embedder finished")
+                return
 
             await asyncio.sleep(config.poll_seconds)
     finally:
