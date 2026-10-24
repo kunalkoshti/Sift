@@ -18,6 +18,7 @@ from sift_common.schema import LogRecord
 
 ROOT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 load_dotenv(ROOT_ENV_FILE)
+DEFAULT_REDIS_STREAM_MAXLEN = 10_000
 
 
 class IngestResponse(BaseModel):
@@ -33,6 +34,18 @@ def create_app(redis_client: Redis | Any | None = None) -> FastAPI:
     stream_name = os.getenv("REDIS_STREAM")
     if not redis_url or not stream_name:
         raise RuntimeError("REDIS_URL and REDIS_STREAM must be configured in .env or the environment")
+
+    raw_stream_maxlen = os.getenv(
+        "REDIS_STREAM_MAXLEN",
+        str(DEFAULT_REDIS_STREAM_MAXLEN),
+    )
+    try:
+        stream_maxlen = int(raw_stream_maxlen)
+    except ValueError as exc:
+        raise RuntimeError("REDIS_STREAM_MAXLEN must be a positive integer") from exc
+    if stream_maxlen < 1:
+        raise RuntimeError("REDIS_STREAM_MAXLEN must be a positive integer")
+
     owns_redis_client = redis_client is None
 
     @asynccontextmanager
@@ -73,6 +86,8 @@ def create_app(redis_client: Redis | Any | None = None) -> FastAPI:
             pipeline.xadd(
                 stream_name,
                 {"record": record.model_dump_json()},
+                maxlen=stream_maxlen,
+                approximate=True,
             )
 
         try:

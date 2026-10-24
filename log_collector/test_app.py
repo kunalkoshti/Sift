@@ -4,6 +4,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from log_collector.app import create_app
 
@@ -22,10 +23,23 @@ VALID_RECORD = {
 
 class FakePipeline:
     def __init__(self) -> None:
-        self.entries: list[tuple[str, dict[str, str]]] = []
+        self.entries: list[tuple[str, dict[str, str], dict[str, object]]] = []
 
-    def xadd(self, stream: str, fields: dict[str, str]) -> None:
-        self.entries.append((stream, fields))
+    def xadd(
+        self,
+        stream: str,
+        fields: dict[str, str],
+        *,
+        maxlen: int | None = None,
+        approximate: bool = True,
+    ) -> None:
+        self.entries.append(
+            (
+                stream,
+                fields,
+                {"maxlen": maxlen, "approximate": approximate},
+            )
+        )
 
     async def execute(self) -> list[str]:
         return [f"{index}-0" for index, _ in enumerate(self.entries, start=1)]
@@ -61,6 +75,7 @@ def test_ingest_accepts_one_record_and_writes_one_stream_entry() -> None:
     entry = redis.pipelines[0].entries[0]
     assert entry[0] == "sift-logs"
     assert json.loads(entry[1]["record"]) == VALID_RECORD
+    assert entry[2] == {"maxlen": 10_000, "approximate": True}
 
 
 def test_ingest_accepts_a_batch() -> None:
@@ -82,3 +97,27 @@ def test_ingest_rejects_malformed_batch_without_writing() -> None:
 
     assert response.status_code == 422
     assert redis.pipelines == []
+
+
+def test_ingest_uses_configured_stream_maxlen(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("REDIS_STREAM_MAXLEN", "2500")
+    redis = FakeRedis()
+
+    response = asyncio.run(_post(redis, VALID_RECORD))
+
+    assert response.status_code == 202
+    assert redis.pipelines[0].entries[0][2] == {
+        "maxlen": 2500,
+        "approximate": True,
+    }
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "not-a-number"])
+def test_ingest_rejects_invalid_stream_maxlen(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("REDIS_STREAM_MAXLEN", value)
+
+    with pytest.raises(RuntimeError, match="REDIS_STREAM_MAXLEN"):
+        create_app(FakeRedis())
