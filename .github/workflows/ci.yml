@@ -27,6 +27,7 @@ jobs:
           filters: |
             frontend:
               - 'frontend/**'
+              - '.github/workflows/ci.yml'
             api:
               - 'log_api/**'
               - 'sift_common/**'
