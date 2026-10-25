@@ -441,6 +441,7 @@ function App() {
             <div className="pipeline-line"><span className="pipeline-node done">✓</span><span>Evidence grounding</span><span className="pipeline-value">active</span></div>
           </div>
           <LiveIndexStatus stats={logStats} />
+          <LogVolumeGraph stats={logStats} error={logStatsError} />
           <LogLevelGraph stats={logStats} error={logStatsError} />
           <div className="side-card about-card">
             <div className="side-card-header"><span>ABOUT THIS VIEW</span></div>
@@ -488,6 +489,7 @@ function ArchitecturePage() {
     { category: "Retrieval", stack: "BGE-small embeddings · BM25/tsvector · RRF · Cross-Encoder", icons: [["Hugging Face", "huggingface", "FFD21E"], ["PostgreSQL", "postgresql", "4169E1"]] },
     { category: "LLM", stack: "LangChain adapters · Groq / Cerebras-compatible models", icons: [["Groq", "groq", "F55036"], ["Cerebras", "cerebras", "F54E42"]] },
     { category: "Operations", stack: "Docker Compose · Google Cloud Run · Cloud Build", icons: [["Docker", "docker", "2496ED"], ["Google Cloud", "googlecloud", "4285F4"]] },
+    { category: "Deployment", stack: "GitHub Actions CI/CD · Cloud Run API and worker jobs · Vercel frontend", icons: [["GitHub Actions", "githubactions", "2088FF"], ["Google Cloud", "googlecloud", "4285F4"], ["Vercel", "vercel", "000000"]] },
     { category: "Evaluation", stack: "pytest · RAGAS · custom behavior checks", icons: [["Python", "python", "3776AB"], ["GitHub Actions", "githubactions", "2088FF"]] },
   ];
 
@@ -605,7 +607,7 @@ function LiveIndexStatus({ stats }: { stats: LogLevelStats | null }) {
   return (
     <div className="side-card live-index-card">
       <div className="side-card-header">
-        <span>LIVE INDEX</span>
+        <span>INDEX STATUS</span>
         <span className="live-pill">{stats?.status === "ready" ? "LIVE" : "LOADING"}</span>
       </div>
       <div className="index-status-line">
@@ -619,6 +621,68 @@ function LiveIndexStatus({ stats }: { stats: LogLevelStats | null }) {
         <div><span>Embedded chunks</span><strong>{stats?.embedded_chunks.toLocaleString() || "—"}</strong></div>
       </div>
       <p className="placeholder-note">Corpus-wide counts refresh automatically.</p>
+    </div>
+  );
+}
+
+function LogVolumeGraph({ stats, error }: { stats: LogLevelStats | null; error: string | null }) {
+  const intervals = stats?.intervals || [];
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  useEffect(() => {
+    setSelectedIndex(intervals.length ? intervals.length - 1 : 0);
+  }, [intervals.length]);
+
+  const selectedInterval = intervals[selectedIndex];
+  const maximumTotal = Math.max(...intervals.map((interval) => interval.total), 1);
+
+  return (
+    <div className="side-card log-volume-card">
+      <div className="side-card-header">
+        <span>LOG VOLUME</span>
+        <span className="live-pill">LIVE</span>
+      </div>
+      <div className="log-level-subtitle">
+        {intervals.length
+          ? "Total records per time window"
+          : error
+            ? "Unable to load indexed logs"
+            : "Loading indexed logs"}
+      </div>
+      {selectedInterval ? (
+        <>
+          <div className="interval-controls">
+            <button className="interval-button" onClick={() => setSelectedIndex((current) => current - 1)} disabled={selectedIndex === 0} aria-label="Previous volume interval">←</button>
+            <span>{formatWindow(selectedInterval.start, selectedInterval.end)}</span>
+            <button className="interval-button" onClick={() => setSelectedIndex((current) => current + 1)} disabled={selectedIndex === intervals.length - 1} aria-label="Next volume interval">→</button>
+          </div>
+          <div className="volume-summary">
+            <strong>{selectedInterval.total.toLocaleString()}</strong>
+            <span>logs in selected window</span>
+          </div>
+          <div className="volume-strip" aria-label="Total logs per time interval">
+            {intervals.map((interval, index) => {
+              const height = `${Math.max(10, (interval.total / maximumTotal) * 72)}px`;
+              return (
+                <button
+                  key={`${interval.start}-${interval.end}`}
+                  className={`volume-bar ${index === selectedIndex ? "selected" : ""}`}
+                  onClick={() => setSelectedIndex(index)}
+                  style={{ height }}
+                  aria-label={`${interval.total} logs for ${formatWindow(interval.start, interval.end)}`}
+                  title={`${interval.total} logs · ${formatWindow(interval.start, interval.end)}`}
+                />
+              );
+            })}
+          </div>
+          <div className="volume-caption">
+            <span>Older</span>
+            <span>Newest</span>
+          </div>
+        </>
+      ) : (
+        <div className="empty-evidence">{error || "No indexed logs are available yet."}</div>
+      )}
     </div>
   );
 }
@@ -654,7 +718,7 @@ function LogLevelGraph({ stats, error }: { stats: LogLevelStats | null; error: s
       {expanded && <button className="chart-backdrop" type="button" onClick={() => setExpanded(false)} aria-label="Close enlarged log-level chart" />}
       <div className={`side-card log-level-card ${expanded ? "expanded" : ""}`} role={expanded ? "dialog" : undefined} aria-modal={expanded || undefined}>
       <div className="side-card-header">
-        <span>ALL LOG LEVELS</span>
+        <span>LOG LEVEL DISTRIBUTION</span>
         <div className="log-level-actions">
           <span className="live-pill">LIVE</span>
           <button
