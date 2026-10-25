@@ -1,0 +1,55 @@
+name: Run live pipeline workers
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Keep this at 15 minutes initially to limit Cloud Run Job usage.
+    - cron: "*/15 * * * *"
+
+concurrency:
+  group: run-live-pipeline-workers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  process:
+    name: Process Redis and embed logs
+    runs-on: ubuntu-latest
+
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+
+    steps:
+      - name: Validate configuration
+        run: |
+          test -n "$GCP_PROJECT_ID"
+          test -n "$GCP_REGION"
+          test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}"
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run consumer job
+        run: |
+          gcloud run jobs execute sift-log-consumer \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --wait
+
+      - name: Run embedder job
+        run: |
+          gcloud run jobs execute sift-log-embedder \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --wait
