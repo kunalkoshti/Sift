@@ -95,6 +95,8 @@ class EmbedderConfig:
     poll_seconds: float
     worker_name: str
     run_once: bool
+    pool_min_size: int
+    pool_max_size: int
 
     @classmethod
     def from_env(cls) -> EmbedderConfig:
@@ -116,6 +118,11 @@ class EmbedderConfig:
         if not worker_name:
             raise RuntimeError("EMBEDDER_WORKER_NAME must not be empty")
 
+        pool_min_size = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+        pool_max_size = int(os.getenv("DB_POOL_MAX_SIZE", "3"))
+        if pool_min_size < 1 or pool_max_size < pool_min_size:
+            raise RuntimeError("DB_POOL_MIN_SIZE/MAX_SIZE must be positive and ordered")
+
         return cls(
             postgres_dsn=required("POSTGRES_DSN"),
             model_name=required("EMBEDDING_MODEL"),
@@ -127,6 +134,8 @@ class EmbedderConfig:
             worker_name=worker_name,
             run_once=os.getenv("EMBEDDER_RUN_ONCE", "false").strip().lower()
             in {"1", "true", "yes", "on"},
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
         )
 
 
@@ -487,7 +496,11 @@ async def replace_dirty_window(
 
 async def run(config: EmbedderConfig | None = None) -> int:
     config = config or EmbedderConfig.from_env()
-    pool = await asyncpg.create_pool(config.postgres_dsn)
+    pool = await asyncpg.create_pool(
+        config.postgres_dsn,
+        min_size=config.pool_min_size,
+        max_size=config.pool_max_size,
+    )
     try:
         await ensure_database_schema(pool)
         raw_logs = await load_raw_logs(pool)
@@ -518,7 +531,11 @@ async def run_live(config: EmbedderConfig | None = None) -> None:
     """Continuously embed only trace/window groups affected by new raw logs."""
 
     config = config or EmbedderConfig.from_env()
-    pool = await asyncpg.create_pool(config.postgres_dsn)
+    pool = await asyncpg.create_pool(
+        config.postgres_dsn,
+        min_size=config.pool_min_size,
+        max_size=config.pool_max_size,
+    )
     model = None
     try:
         await ensure_database_schema(pool)

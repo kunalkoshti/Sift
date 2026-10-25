@@ -106,6 +106,8 @@ services:
       REDIS_BLOCK_MS: ${REDIS_BLOCK_MS}
       REDIS_GROUP_START_ID: ${REDIS_GROUP_START_ID}
       CONSUMER_RUN_ONCE: ${CONSUMER_RUN_ONCE:-false}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-3}
       POSTGRES_DSN: postgresql://sift:sift@postgres:5432/sift
       LOG_LEVEL: ${LOG_LEVEL}
 
@@ -149,6 +151,8 @@ services:
       EMBEDDER_POLL_SECONDS: ${EMBEDDER_POLL_SECONDS:-10}
       EMBEDDER_WORKER_NAME: ${EMBEDDER_WORKER_NAME:-live-embedder}
       EMBEDDER_RUN_ONCE: ${EMBEDDER_RUN_ONCE:-false}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-1}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-3}
       HF_HOME: /root/.cache/huggingface
       LOG_LEVEL: ${LOG_LEVEL}
     volumes:
