@@ -200,9 +200,7 @@ jobs:
           test -n "${{ secrets.VERCEL_TOKEN }}"
 
       - name: Pull Vercel production environment
-        working-directory: frontend
         run: vercel pull --yes --environment=production --token="${{ secrets.VERCEL_TOKEN }}"
 
       - name: Deploy frontend and build on Vercel
-        working-directory: frontend
         run: vercel deploy --prod --token="${{ secrets.VERCEL_TOKEN }}"
