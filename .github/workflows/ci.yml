@@ -188,6 +188,10 @@ jobs:
       - name: Install Vercel CLI
         run: npm install --global vercel@latest
 
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
       - name: Validate Vercel configuration
         run: |
           test -n "${VERCEL_ORG_ID}"
