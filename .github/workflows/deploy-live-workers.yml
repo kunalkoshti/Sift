@@ -1,0 +1,110 @@
+name: Deploy live pipeline workers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "log_consumer/**"
+      - "log_embedder/**"
+      - "sift_common/**"
+      - "db/schema.sql"
+      - "pyproject.toml"
+      - ".github/workflows/deploy-live-workers.yml"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Build and deploy live workers
+    runs-on: ubuntu-latest
+
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REPOSITORY || 'sift' }}
+      CONSUMER_JOB: sift-log-consumer
+      EMBEDDER_JOB: sift-log-embedder
+      LIVE_REDIS_URL: ${{ secrets.LIVE_REDIS_URL }}
+      LIVE_POSTGRES_DSN: ${{ secrets.LIVE_POSTGRES_DSN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Validate deployment configuration
+        run: |
+          test -n "$GCP_PROJECT_ID"
+          test -n "$GCP_REGION"
+          test -n "$LIVE_REDIS_URL"
+          test -n "$LIVE_POSTGRES_DSN"
+          test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+          test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}"
+
+      - name: Build and push worker images
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          export REGISTRY="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}"
+          export CONSUMER_IMAGE="${REGISTRY}/log-consumer:${IMAGE_TAG}"
+          export EMBEDDER_IMAGE="${REGISTRY}/log-embedder:${IMAGE_TAG}"
+
+          gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+          docker build \
+            --file log_consumer/Dockerfile \
+            --tag "${CONSUMER_IMAGE}" \
+            .
+          docker push "${CONSUMER_IMAGE}"
+
+          docker build \
+            --file log_embedder/Dockerfile \
+            --tag "${EMBEDDER_IMAGE}" \
+            .
+          docker push "${EMBEDDER_IMAGE}"
+
+          echo "CONSUMER_IMAGE=${CONSUMER_IMAGE}" >> "${GITHUB_ENV}"
+          echo "EMBEDDER_IMAGE=${EMBEDDER_IMAGE}" >> "${GITHUB_ENV}"
+
+      - name: Deploy consumer Cloud Run Job
+        run: |
+          gcloud run jobs deploy "$CONSUMER_JOB" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$CONSUMER_IMAGE" \
+            --tasks 1 \
+            --parallelism 1 \
+            --max-retries 1 \
+            --task-timeout 10m \
+            --cpu 1 \
+            --memory 512Mi \
+            --set-env-vars "^|^REDIS_URL=${LIVE_REDIS_URL}|POSTGRES_DSN=${LIVE_POSTGRES_DSN}|REDIS_STREAM=sift-logs|REDIS_GROUP=sift-log-consumers|REDIS_CONSUMER=cloud-run-consumer|REDIS_READ_COUNT=100|REDIS_BLOCK_MS=0|REDIS_GROUP_START_ID=0|CONSUMER_RUN_ONCE=true|DB_POOL_MIN_SIZE=1|DB_POOL_MAX_SIZE=3|LOG_LEVEL=INFO" \
+            --quiet
+
+      - name: Deploy embedder Cloud Run Job
+        run: |
+          gcloud run jobs deploy "$EMBEDDER_JOB" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --image "$EMBEDDER_IMAGE" \
+            --tasks 1 \
+            --parallelism 1 \
+            --max-retries 1 \
+            --task-timeout 15m \
+            --cpu 1 \
+            --memory 2Gi \
+            --set-env-vars "^|^POSTGRES_DSN=${LIVE_POSTGRES_DSN}|EMBEDDING_MODEL=BAAI/bge-small-en-v1.5|CHUNK_WINDOW_SECONDS=60|EMBED_BATCH_SIZE=32|MAX_RECORDS_PER_CHUNK=25|EMBEDDER_MODE=live|EMBEDDER_POLL_SECONDS=1|EMBEDDER_WORKER_NAME=cloud-run-live-embedder|EMBEDDER_RUN_ONCE=true|DB_POOL_MIN_SIZE=1|DB_POOL_MAX_SIZE=3|HF_HOME=/tmp/huggingface|LOG_LEVEL=INFO" \
+            --quiet
+

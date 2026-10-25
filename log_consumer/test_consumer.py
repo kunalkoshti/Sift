@@ -64,3 +64,5 @@ def test_consumer_config_reads_environment(monkeypatch):
     assert config.group == "test-group"
     assert config.consumer == "test-consumer"
     assert config.run_once is True
+    assert config.pool_min_size == 1
+    assert config.pool_max_size == 3

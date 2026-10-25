@@ -52,6 +52,8 @@ class ConsumerConfig:
     block_ms: int
     group_start_id: str
     run_once: bool
+    pool_min_size: int
+    pool_max_size: int
 
     @classmethod
     def from_env(cls) -> ConsumerConfig:
@@ -60,6 +62,11 @@ class ConsumerConfig:
             if not value:
                 raise RuntimeError(f"{name} must be configured in .env or the environment")
             return value
+
+        pool_min_size = int(os.getenv("DB_POOL_MIN_SIZE", "1"))
+        pool_max_size = int(os.getenv("DB_POOL_MAX_SIZE", "3"))
+        if pool_min_size < 1 or pool_max_size < pool_min_size:
+            raise RuntimeError("DB_POOL_MIN_SIZE/MAX_SIZE must be positive and ordered")
 
         return cls(
             redis_url=required("REDIS_URL"),
@@ -72,6 +79,8 @@ class ConsumerConfig:
             group_start_id=required("REDIS_GROUP_START_ID"),
             run_once=os.getenv("CONSUMER_RUN_ONCE", "false").strip().lower()
             in {"1", "true", "yes", "on"},
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
         )
 
 
@@ -194,7 +203,11 @@ async def run_once(
 async def run(config: ConsumerConfig | None = None) -> None:
     config = config or ConsumerConfig.from_env()
     redis = from_url(config.redis_url, decode_responses=True)
-    pool = await asyncpg.create_pool(config.postgres_dsn)
+    pool = await asyncpg.create_pool(
+        config.postgres_dsn,
+        min_size=config.pool_min_size,
+        max_size=config.pool_max_size,
+    )
     try:
         await ensure_database_schema(pool)
         await ensure_consumer_group(redis, config)
