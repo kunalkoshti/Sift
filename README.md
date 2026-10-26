@@ -1,414 +1,441 @@
 # Sift
 
-Sift is a structured-log ingestion and RAG system for investigating application incidents.
+Sift is an incident-investigation application for structured application logs. It
+turns noisy service logs into searchable evidence, trace-aware incident context,
+and answers grounded in retrieved records.
 
-> **Status:** actively under development. The ingestion, live incremental embedding, retrieval API, evaluation harness, and React frontend are working. Production deployment is still being hardened.
+The repository contains a live ingestion pipeline, a hybrid retrieval API, a
+React chat interface, an evaluation harness, and production deployment files.
+
+## Product tour
+
+The frontend includes three views:
+
+- **Chat** — ask why an incident happened and inspect the answer, evidence,
+  traces, and chronological timeline.
+- **Architecture** — an interactive explanation of the ingestion and retrieval
+  flow, technologies, deployment, and supported query types. Open the deployed
+  frontend and choose **Architecture** to explore it.
+- **Production metrics** — a private admin view for request traffic, errors,
+  rate limiting, latency, payload rejections, and approximate unique
+  authenticated visitors.
 
 ## Architecture
 
-~~~text
-log_generator -> log_collector -> Redis -> log_consumer -> PostgreSQL.raw_logs
-                                                               |
-                                                log_embedder -> PostgreSQL.chunks
-                                                               |
-                                                   log_api -> LLM answer
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 70, "rankSpacing": 90}, "themeVariables": {"fontSize": "18px"}}}%%
+flowchart TD
+    subgraph INGEST[Live log pipeline]
+        G[Log generator<br/>seeded incidents + noise] --> C[Collector<br/>FastAPI]
+        C --> R[(Redis stream)]
+        R --> N[Consumer<br/>deduplicate + persist]
+        N --> RAW[(PostgreSQL<br/>raw_logs)]
+        RAW --> E[Embedder<br/>time windows + vectors]
+        E --> CH[(PostgreSQL<br/>chunks + pgvector + tsvector)]
+    end
 
-evaluation -> log_api /ask -> RAGAS + behavior checks -> PostgreSQL.eval_runs
-~~~
+    subgraph RETRIEVAL[Question answering]
+        UI[React/Vite frontend] --> Q[log-api<br/>scope + filters + retrieval]
+        Q --> D[Dense search<br/>pgvector]
+        Q --> X[Lexical search<br/>PostgreSQL FTS]
+        D --> F[Weighted RRF fusion]
+        X --> F
+        F --> RR[Cross-encoder reranking]
+        RR --> T[Trace expansion<br/>chronological context]
+        T --> L[LLM<br/>grounded answer]
+        L --> UI
+    end
 
-log_api reads the chunks table directly; it does not receive records from log_embedder at runtime.
+    CH --> Q
+    Q --> M[(Redis<br/>rate limits + metrics)]
+    EV[Evaluation harness] --> Q
+    EV --> ER[(PostgreSQL<br/>eval_runs)]
+```
 
-Services:
+The deployed runtime is split across managed services:
 
-- log_generator creates seeded background noise and scripted incidents.
-- log_collector validates single records or batches and writes them to Redis.
-- log_consumer persists deduplicated records in raw_logs.
-- log_embedder builds time-windowed chunks and embeddings.
-- log_api retrieves evidence and answers questions through POST /ask.
-- evaluation measures answer, retrieval, and behavior quality.
+| Component | Local development | Production |
+|---|---|---|
+| Frontend | Vite dev server | Vercel |
+| API | Docker Compose | Google Cloud Run |
+| Database and authentication | Supabase or local PostgreSQL | Supabase PostgreSQL + Supabase Auth |
+| Rate limits and metrics | Local Redis | Upstash Redis |
+| Log generation | Local command or GitHub Actions | GitHub Actions scheduled producer |
+| Consumer and embedder | Docker Compose | Cloud Run Jobs triggered by GitHub Actions |
 
-## Core design
+The API reads `chunks` directly from PostgreSQL. It does not receive records
+from the embedder at runtime; both services use the shared database.
 
-Logs follow one contract:
+<details>
+<summary>Explore the pipeline step by step</summary>
 
-~~~text
-schema_version, timestamp, level, service, host, message, trace_id, metadata
-~~~
+1. **Generate** — scripted incident scenarios and background noise produce
+   structured records with timestamps, services, levels, and trace IDs.
+2. **Collect** — the collector validates records and writes them to a bounded
+   Redis stream.
+3. **Persist** — the consumer reads the stream, deduplicates records, and
+   stores them in `raw_logs`.
+4. **Embed** — the embedder groups records into chronological windows and
+   writes embeddings plus lexical-search data to `chunks`.
+5. **Understand** — the API parses service and temporal intent from a question.
+6. **Retrieve** — dense, lexical, reranked, filtered, and trace-expanded
+   evidence is assembled into chronological context.
+7. **Answer** — the LLM produces a grounded response; reliability gates can
+   abstain, flag ambiguity, or request one evidence-focused retry.
 
-Records are partitioned by trace ID before chunking. Each non-null trace ID forms an incident partition; null trace IDs form the background-noise partition. Each partition is grouped into fixed 60-second UTC windows and capped at 25 records. Oversized windows are split chronologically using sub_index.
+</details>
 
-Chunk content contains one newline-separated record per line:
+## RAG approach
 
-~~~text
-[HH:MM:SS] LEVEL service: message
-~~~
+### Ingestion and chunking
 
-Newlines preserve event boundaries. Trace IDs and raw log IDs remain in database columns for exact traceability rather than being included in embedded prose.
+Every log record follows a shared schema containing timestamp, level, service,
+message, trace ID, and metadata. The consumer deduplicates records into
+`raw_logs`. The embedder groups records into chronological, fixed-size windows
+and stores:
 
-Embeddings use normalized BAAI/bge-small-en-v1.5 vectors with 384 dimensions. Chunks are stored in PostgreSQL with pgvector and a generated PostgreSQL full-text index.
+- human-readable chunk content;
+- service and trace metadata;
+- window start and end timestamps;
+- a 384-dimensional `BAAI/bge-small-en-v1.5` embedding;
+- PostgreSQL full-text search data.
 
-## Retrieval
+```mermaid
+flowchart LR
+    LOG[Structured log record] --> V[Validate schema]
+    V --> D[Deduplicate]
+    D --> RAW[(raw_logs)]
+    RAW --> W[Group by trace and 60-second window]
+    W --> S[Split oversized windows]
+    S --> EMB[Generate 384-dim embedding]
+    S --> FTS[Generate full-text search data]
+    EMB --> CH[(chunks)]
+    FTS --> CH
+```
 
-The default mode is hybrid:
+### Retrieval pipeline
 
-1. Parse supported service and time expressions.
-2. Apply service/time filters to the initial SQL search.
-3. Run dense pgvector search and PostgreSQL full-text search.
-4. Fuse results with weighted reciprocal rank fusion.
-5. Rerank candidates with cross-encoder/ms-marco-MiniLM-L-6-v2.
-6. Discover trace IDs from the larger candidate pool.
-7. Expand selected traces without the initial service/time boundaries.
-8. Sort context chronologically and send it to the LLM.
+1. Parse supported service and temporal expressions.
+2. Apply metadata filters as an initial search boundary.
+3. Run dense vector search and PostgreSQL lexical search.
+4. Fuse both rankings with weighted reciprocal rank fusion.
+5. Rerank candidates with `cross-encoder/ms-marco-MiniLM-L-6-v2`.
+6. Use trace IDs from the candidate pool to expand complete incident traces.
+7. For multiple strong traces, expand them separately and add an ambiguity note.
+8. Sort the final context chronologically before sending it to the LLM.
 
-Default retrieval settings:
+Metadata filters are entry points, not causal boundaries. Trace expansion can
+retrieve related services and events outside the initial service or time filter
+so upstream causes are not lost. Context and trace expansion are capped to
+protect latency and prompt size.
 
-~~~text
-RETRIEVAL_TOP_K=5
-TRACE_CANDIDATE_K=40
-RRF_K=60
-DENSE_RRF_WEIGHT=1.0
-LEXICAL_RRF_WEIGHT=1.0
-MAX_TRACE_CHUNKS=50
-~~~
+```mermaid
+flowchart TD
+    Q[User question] --> P[Parse service and time intent]
+    P --> MF[Initial metadata filters]
+    MF --> DS[Dense vector search]
+    MF --> LS[Lexical PostgreSQL search]
+    DS --> RRF[Weighted RRF fusion]
+    LS --> RRF
+    RRF --> RE[Cross-encoder reranking]
+    RE --> TI[Inspect trace IDs]
+    TI --> ONE{One or more strong traces?}
+    ONE -->|No| CTX[Use ranked context]
+    ONE -->|Yes| EXP[Expand selected traces across services]
+    EXP --> AMB[Add ambiguity note when needed]
+    AMB --> CTX
+    CTX --> SORT[Sort events chronologically]
+    SORT --> LLM[Grounded LLM answer]
+```
 
-The RRF weights are score contributions, not percentages.
+### Reliability controls
 
-Severity is still stored and shown in context, but it is not used as a hard retrieval filter. Hard severity filtering previously removed causal precursor events.
+- **Deterministic scope gate:** rejects clearly out-of-scope questions such as
+  weather, revenue, and customer demographics without retrieval.
+- **Confidence gate:** abstains on weak unfiltered retrieval when no incident
+  trace supports the result.
+- **Evidence gate:** checks generated claims against retrieved chunks and can
+  perform one bounded evidence-focused retry.
+- **Deterministic empty retrieval:** avoids asking an LLM to invent an answer
+  when no evidence is available.
+- **Fallback disclosure:** temporal misses can use broader context, but the
+  answer and retrieval metadata disclose that fallback.
+- **Redis sliding-window rate limiting:** limits requests per authenticated user
+  and fails closed if the shared limiter is unavailable.
 
-Unknown services, unsupported time expressions, and empty retrievals are handled deterministically. If multiple incident traces have similarly strong scores, the API expands them separately and adds an ambiguity note.
+These choices improve lexical matching for exact incident terms, preserve causal
+cross-service context, make ambiguity visible, and reduce unsupported answers.
+They also add latency and do not guarantee that every competing incident is
+found.
 
-Gate 1 self-RAG confidence handling is controlled by `SELFRAG_CONFIDENCE_GATE_MODE`.
-In `shadow` mode it logs the best dense cosine similarity and proposed decision
-without changing answers. In `enforce` mode, weak dense evidence with no correlated
-trace returns a deterministic abstention before the LLM is called. The initial
-default threshold is provisional and must be calibrated from score distributions;
-RRF and reranker scores are not used as confidence thresholds.
-Recognized service-filter queries that return chunks bypass this gate, including
-noise-only results, so they retain service-specific no-incident handling. Queries
-that use the temporal full-corpus fallback also bypass the gate because their
-retrieval result has a different interpretation. A trace in the top-k candidates
-counts as strong evidence; a trace found deeper in the pre-expansion pool counts
-only when its dense similarity reaches the configured threshold.
+## Retrieval progression
 
-Gate 2 performs post-generation evidence verification. It asks the configured
-API model to check whether factual answer claims are supported by specific
-retrieved chunks, timestamps, and services. It is controlled by:
+Sift was built incrementally. Each layer addresses a different failure mode:
 
-~~~text
-SELFRAG_EVIDENCE_GATE_MODE=shadow
-SELFRAG_EVIDENCE_MODEL=
-SELFRAG_EVIDENCE_MAX_UNSUPPORTED_CLAIMS=0
-SELFRAG_EVIDENCE_MAX_RETRIES=1
-~~~
+<details>
+<summary>Dense retrieval — semantic similarity</summary>
 
-In shadow mode, Gate 2 logs verification results without changing answers. In
-enforce mode, an unsupported answer gets at most one evidence-focused rewrite;
-if it still cannot be verified, the API returns a deterministic cautious
-response. Empty retrieval bypasses Gate 2 because it already uses deterministic
-abstention. The verifier references are then checked deterministically against
-the actual retrieved chunk IDs, services, and timestamps. A factual answer with
-missing or invalid references is treated as unsupported. Gate 2 uses the
-log-api LLM configuration, while RAGAS and behavior classification continue
-using the separate `EVAL_*` configuration.
+Embeddings find conceptually related incidents even when the question and log
+use different wording. This is useful for vague root-cause questions, but can
+also return semantically similar noise.
 
-Gate 3 performs a deterministic scope and answerability check before retrieval.
-It blocks only high-confidence out-of-scope categories such as weather,
-financial metrics, customer demographics, and aggregate business statistics.
-Ambiguous questions and normal operational log questions continue through the
-regular retrieval, Gate 1, and Gate 2 flow.
+</details>
 
-~~~text
-SELFRAG_SCOPE_GATE_MODE=shadow
-~~~
+<details>
+<summary>Hybrid retrieval — dense plus lexical search</summary>
 
-In shadow mode, the scope decision is logged without changing the response. In
-enforce mode, clearly out-of-scope questions receive a deterministic response
-without an embedding, database retrieval, or LLM call. This gate is
-high-precision by design to avoid blocking valid operational questions such as
-rate-limit incidents.
+PostgreSQL full-text search catches exact service names, error codes, order IDs,
+and distinctive log phrases. Reciprocal rank fusion combines those results
+with dense similarity instead of depending on either signal alone.
 
-## Setup
+</details>
 
-Create local configuration:
+<details>
+<summary>Reranking — cross-encoder relevance refinement</summary>
 
-~~~bash
-cp .env.example .env
-# Set GROQ_API_KEY and EVAL_API_KEY in .env as required.
-~~~
+The cross-encoder scores the question and candidate chunk together. This
+improves the ordering of the small final evidence set after broad retrieval.
 
-Install the project and development dependencies:
+</details>
 
-~~~bash
-python3 -m venv log_generator/.venv
-log_generator/.venv/bin/pip install -e '.[dev,log_generator,log_collector,log_consumer,log_embedder,log_api,evaluation]'
-~~~
+<details>
+<summary>Query filtering — metadata and trace-aware expansion</summary>
 
-Start the ingestion services:
+Service and temporal expressions narrow the initial search. Trace expansion
+then restores related services and causal events so a service filter does not
+hide the upstream cause. Multiple strong traces are kept separate and called
+out as ambiguity.
 
-~~~bash
-docker compose up -d redis postgres log-collector log-consumer
-~~~
+</details>
 
-Generate and send an incident corpus:
+<details>
+<summary>Self-RAG — answerability and evidence controls</summary>
 
-~~~bash
-log_generator/.venv/bin/python log_generator/send_to_collector.py \
-  --collector-url http://localhost:8000 \
-  --scenario payment-timeout-v1 \
-  --seed 101 \
-  --noise-count 250 \
-  --batch-size 50 \
-  --output data/logs/payment-timeout-v1.jsonl \
-  --ground-truth data/ground_truth/payment-timeout-v1.json
-~~~
+The confidence, scope, and evidence gates make abstention deterministic,
+validate generated claims against retrieved chunks, and bound corrective
+retries. The main benefit is safer behavior and better observability, not a
+guaranteed increase in every aggregate RAGAS metric.
 
-Rebuild chunks and start the API:
-
-~~~bash
-docker compose run --rm --build log-embedder
-docker compose up -d --build log-api
-~~~
-
-Check health and ask a question:
-
-~~~bash
-curl -s http://localhost:8001/health | jq
-
-curl -s -X POST http://localhost:8001/ask \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"What caused the payment failures?"}' | jq
-~~~
-
-Ollama is optional and runs only with the local-llm Compose profile. Remote providers can be used to avoid loading a local generation model into device memory.
-
-## Deployment automation
-
-GitHub Actions runs the full backend test suite, validates Docker Compose, and builds
-the frontend on every push and pull request. Production deployment is restricted to
-successful pushes to `main`:
-
-- changes under `frontend/` deploy the Vite app to Vercel;
-- changes under `log_api/`, `sift_common/`, `db/schema.sql`, or deployment
-  configuration deploy `log-api` to Cloud Run;
-- a commit touching both areas deploys both services.
-
-The API deployment updates `CORS_ORIGINS` using the stable Vercel production URL.
-The frontend reads `VITE_API_URL` from the Vercel Production environment during its
-build, so the API URL is not committed to the repository.
-
-Configure these GitHub repository variables:
-
-~~~text
-GCP_PROJECT_ID
-GCP_REGION
-ARTIFACT_REPOSITORY       # optional; defaults to sift
-LOG_API_SERVICE           # optional; defaults to sift-log-api
-VERCEL_FRONTEND_URL       # stable https://...vercel.app production URL
-SUPABASE_URL              # https://<project-ref>.supabase.co
-~~~
-
-Configure these GitHub Actions secrets:
-
-~~~text
-GCP_WORKLOAD_IDENTITY_PROVIDER
-GCP_SERVICE_ACCOUNT
-VERCEL_TOKEN
-VERCEL_ORG_ID
-VERCEL_PROJECT_ID
-~~~
-
-The Vercel project should use `frontend` as its root directory and have
-`VITE_API_URL` configured for the Production environment. The Cloud Run service must
-already have its runtime settings and secrets, including `POSTGRES_DSN`,
-`LIVE_REDIS_URL` as a GitHub secret for the shared Redis instance, `LLM_MODEL`,
-and the LLM API key. The API deployment maps `LIVE_REDIS_URL` to `REDIS_URL`.
-
-The frontend supports Supabase email/password and Google OAuth sign-in. Configure
-both providers in Supabase Authentication, add the local and Vercel URLs to the
-allowed redirect URLs, and set these Vercel Production environment variables:
-
-~~~text
-VITE_API_URL
-VITE_SUPABASE_URL
-VITE_SUPABASE_PUBLISHABLE_KEY   # the older dashboard calls this the anon key
-~~~
-
-When the API is deployed by the workflow, it sets `AUTH_REQUIRED=true` and
-derives the Supabase JWKS and issuer URLs from `SUPABASE_URL`. `/health` remains
-public for Cloud Run probes; `/ask` and `/stats/log-levels` require a valid
-Supabase access token. The API does not receive or store the Google client secret.
-
-### API protection and monitoring
-
-The API applies three lightweight operational safeguards:
-
-- `MAX_REQUEST_BYTES` rejects oversized request bodies with HTTP `413` before
-  authentication or LLM work. The default is 16 KiB.
-- `RATE_LIMIT_REQUESTS` requests per `RATE_LIMIT_WINDOW_SECONDS` are allowed per
-  verified Supabase user. When authentication is disabled locally, the limiter
-  falls back to the client IP. The default is 30 requests per 60 seconds and
-  excess requests receive HTTP `429` with a `Retry-After` header.
-- `GET /metrics` exposes low-cardinality request counters, status codes, route
-  counts, rate-limit rejections, payload rejections, and process uptime. Every
-  request also emits a structured `http_request` log with status and latency,
-  which can be queried in Cloud Run Logs Explorer.
-- Authenticated administrators can use `GET /admin/metrics` to view Redis-backed
-  minute buckets for request volume, 5xx errors, rate-limit events, rejected
-  payloads, average latency, and approximate unique authenticated visitors.
-  Access is controlled by the backend
-  `ADMIN_EMAILS` and/or `ADMIN_USER_IDS` allowlists.
-
-Rate-limit state is stored in Redis using an atomic sorted-set sliding window,
-so limits remain shared if Cloud Run adds instances. The Redis key prefix is
-configurable through `REDIS_RATE_LIMIT_PREFIX` and is separate from the log
-stream. If Redis is unavailable, protected endpoints return HTTP `503` rather
-than silently serving requests without rate-limit protection. The counters and
-uptime in `/metrics` remain process-local and reset when an instance restarts;
-they are operational diagnostics, not a durable audit log.
-
-Example checks:
-
-~~~bash
-curl -fsS "$LOG_API_URL/health" | jq
-curl -fsS "$LOG_API_URL/metrics" | jq
-
-# This requires a Supabase access token for an allowlisted administrator.
-curl -fsS "$LOG_API_URL/admin/metrics" \
-  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | jq
-
-# The API should reject a request without a Supabase access token when deployed.
-curl -i -X POST "$LOG_API_URL/ask" \
-  -H 'Content-Type: application/json' \
-  -d '{"question":"Why did payment authorization time out?"}'
-~~~
+</details>
 
 ## Evaluation
 
-The current filter-retrieval evaluation uses the frozen 32-question file:
+The evaluation harness runs the same questions through `/ask`, stores one row
+per question in `eval_runs`, and measures answer quality, retrieval quality, and
+expected behavior. The frozen 32-question set covers root cause, ambiguity,
+service and temporal queries, weak similarity, out-of-scope questions, empty
+retrieval, and fallback behavior.
 
-~~~text
-evaluation/questions_stage4.json
-~~~
+The following charts show the latest recorded Gate 1 and Self-RAG values. Use
+the expandable sections to switch between metrics. The evaluation database is
+the source of truth, and these values should be refreshed after the next full
+baseline run. Gate 1 and Self-RAG were compared on the same frozen question
+set; the observed benefit of Self-RAG was operational reliability—scope
+handling, evidence validation, bounded retries, and observability—rather than
+a large aggregate RAGAS improvement. Empty retrieval and cases where context
+metrics are not meaningful are excluded from those metric aggregates.
 
-Questions cover root cause, alternate phrasing, ambiguity, unrelated services, out-of-scope requests, weak similarity, service/time filtering, multi-service retrieval, unknown services, unsupported time expressions, and no-result behavior.
+<details open>
+<summary>Faithfulness — 0.785 Gate 1 vs 0.784 Self-RAG · 25/32 valid</summary>
 
-The harness stores one row per question in eval_runs and records:
+```mermaid
+xychart-beta
+    title "Faithfulness"
+    x-axis [Gate 1, Self-RAG]
+    y-axis "Score" 0 --> 1
+    bar [0.785, 0.784]
+```
 
-- generated answer;
-- retrieved chunk IDs;
-- latency;
-- faithfulness;
-- answer relevancy;
-- context precision;
-- context recall;
-- classified behavior;
-- behavior match;
-- classifier failure state;
-- fallback disclosure for time-range fallback answers.
+</details>
 
-Faithfulness is skipped when no context was retrieved. Context precision and recall are skipped when there is no reference answer or no retrieved context. The last-week-no-results fallback question is excluded from aggregate context precision/recall reporting because its result depends on the fallback retrieval note rather than ordinary in-range retrieval.
-Behavior classification receives the API retrieval note, and fallback disclosure is recorded separately from the four behavior labels.
+<details>
+<summary>Answer relevancy — 0.768 Gate 1 vs 0.737 Self-RAG · 32/32 valid</summary>
 
-Run the current evaluation with the provider configured in .env:
+```mermaid
+xychart-beta
+    title "Answer relevancy"
+    x-axis [Gate 1, Self-RAG]
+    y-axis "Score" 0 --> 1
+    bar [0.768, 0.737]
+```
 
-~~~bash
+</details>
+
+<details>
+<summary>Context precision — 0.902 Gate 1 vs 0.883 Self-RAG · 21/32 valid</summary>
+
+```mermaid
+xychart-beta
+    title "Context precision"
+    x-axis [Gate 1, Self-RAG]
+    y-axis "Score" 0 --> 1
+    bar [0.902, 0.883]
+```
+
+</details>
+
+<details>
+<summary>Context recall — 0.893 Gate 1 vs 0.905 Self-RAG · 21/32 valid</summary>
+
+```mermaid
+xychart-beta
+    title "Context recall"
+    x-axis [Gate 1, Self-RAG]
+    y-axis "Score" 0 --> 1
+    bar [0.893, 0.905]
+```
+
+</details>
+
+<details>
+<summary>Behavior match — 96.88% Gate 1 vs 96.88% Self-RAG · 32/32 valid</summary>
+
+```mermaid
+xychart-beta
+    title "Expected behavior match"
+    x-axis [Gate 1, Self-RAG]
+    y-axis "Percent" 0 --> 100
+    bar [96.88, 96.88]
+```
+
+</details>
+
+Run an evaluation locally:
+
+```bash
 RAGAS_MAX_TOKENS=4096 \
 log_generator/.venv/bin/python -m evaluation.run_eval \
   --api-url http://localhost:8001 \
   --questions evaluation/questions_stage4.json \
-  --stage gate1_final_baseline_clean \
+  --stage local_baseline_$(date +%Y%m%d) \
   --delay-seconds 60 \
   --metric-delay-seconds 60
-~~~
+```
 
-Use a new stage name for every distinct run. Compare results only when the question file, data corpus, model configuration, and scoring policy are the same.
+Use a new stage name for each distinct run. Compare runs only when the question
+set, corpus, model configuration, and scoring policy are unchanged.
 
-## Latest recorded evaluation
+## Technology stack
 
-The final Self-RAG evaluation used the frozen 32-question set under
-`gate2_evidence_strict_recheck`.
+| Area | Technologies | Purpose |
+|---|---|---|
+| API | Python, FastAPI, Uvicorn, Pydantic | HTTP API, validation, lifecycle |
+| Retrieval | PostgreSQL, pgvector, PostgreSQL full-text search, RRF | Dense/lexical hybrid retrieval |
+| Models | Sentence Transformers, BGE-small, MiniLM cross-encoder | Embeddings and reranking |
+| Generation | LangChain Core, LangChain OpenAI/Ollama integrations | Provider-compatible LLM calls |
+| Auth | Supabase Auth, JWT/JWKS, Google OAuth, email/password | Protected API access |
+| State | Redis, Upstash Redis | Streams, rate limits, metrics |
+| Frontend | React, TypeScript, Vite, React Markdown | Chat, evidence, architecture, metrics |
+| Testing | Pytest, HTTPX, Docker Compose validation | Unit, API, and configuration checks |
+| Deployment | Docker, GitHub Actions, Google Cloud Run, Cloud Run Jobs, Vercel | CI/CD and managed hosting |
 
-Aggregate results:
+## Local setup
 
-| Metric | Result | Valid values |
-|---|---:|---:|
-| Faithfulness | 0.784 | 25/32 |
-| Answer relevancy | 0.737 | 32/32 |
-| Context precision | 0.883 | 21/32 |
-| Context recall | 0.905 | 21/32 |
-| Behavior match | 96.88% | 31/32 |
+Requirements: Python 3.13, Docker Compose, Node.js 22, and credentials for the
+selected LLM provider.
 
-The run stored all 32 rows with no provider, API, or classifier failures. Seven
-questions had deterministic empty retrieval, so their faithfulness, context
-precision, and context recall values were intentionally NULL. Context precision
-and recall were also excluded for questions where those metrics are not
-meaningful, such as no-incident and fallback cases. The evidence gate ran for
-25 questions and completed three successful corrective retries.
+```bash
+git clone https://github.com/kunalkoshti/Sift.git
+cd Sift
 
-The only behavior mismatch was `midnight-downstream-ambiguity`, where the model
-answered from a single retrieved trace instead of explicitly flagging ambiguity.
-This remains a documented retrieval limitation. The recorded run also contained
-one false-negative `fallback_disclosed` flag caused by wording variation; the
-answer itself disclosed that it used the retrieved evidence outside the requested
-time window, and the checker now recognizes that wording. Earlier evaluation
-tables are not included because they used different question sets or scoring
-policies.
+cp .env.example .env
+python3 -m venv log_generator/.venv
+log_generator/.venv/bin/pip install -e \
+  '.[dev,log_generator,log_collector,log_consumer,log_embedder,log_api,evaluation]'
+```
 
-For comparison, the earlier Gate 1 run used the same question set:
+For a simple local setup, use Ollama or a configured remote provider and keep
+authentication disabled initially:
 
-| Metric | Gate 1 | Final Self-RAG | Valid values |
-|---|---:|---:|---:|
-| Faithfulness | 0.785 | 0.784 | 25/32 |
-| Answer relevancy | 0.768 | 0.737 | 32/32 |
-| Context precision | 0.902 | 0.883 | 21/32 |
-| Context recall | 0.893 | 0.905 | 21/32 |
-| Behavior match | 96.88% | 96.88% | 32/32 |
+```dotenv
+AUTH_REQUIRED=false
+CORS_ORIGINS=http://localhost:5173
+```
 
-The final Self-RAG run recovered faithfulness from the preceding evidence-gate
-run's 0.754 to 0.784 and improved context recall from 0.889 to 0.905. It did
-not materially exceed the Gate 1 faithfulness result. Self-RAG therefore adds
-deterministic scope handling, evidence validation, bounded correction, and
-better observability, but not a large aggregate RAGAS improvement.
+Start the database, Redis, collector, consumer, and API:
 
-## Tests
+```bash
+docker compose up -d --build redis postgres log-collector log-consumer log-api
+```
 
-~~~bash
+Generate a small incident corpus and embed it:
+
+```bash
+log_generator/.venv/bin/python log_generator/send_to_collector.py \
+  --collector-url http://localhost:8000 \
+  --scenario payment-timeout-v1 \
+  --seed 101 \
+  --noise-count 20 \
+  --batch-size 5 \
+  --output /tmp/sift-live.jsonl
+
+docker compose run --rm --build log-embedder
+```
+
+Check the API:
+
+```bash
+curl -fsS http://localhost:8001/health | jq
+curl -sS -X POST http://localhost:8001/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Why did payment authorization time out?"}' | jq
+```
+
+Run the frontend:
+
+```bash
+cd frontend
+cp .env.example .env.local
+# Set VITE_API_URL=http://localhost:8001 and Supabase variables as needed.
+npm ci
+npm run dev
+```
+
+Open `http://localhost:5173`. When local authentication is enabled, configure
+Supabase redirect URLs for the local frontend and set `VITE_ADMIN_EMAILS` for
+the private metrics link.
+
+## Production deployment
+
+Production deployment is performed by GitHub Actions after tests pass on a push
+to `main`:
+
+- frontend changes deploy the React app to Vercel;
+- API or deployment changes build and deploy `log-api` to Cloud Run;
+- live producer changes run through the scheduled GitHub Actions producer;
+- consumer and embedder jobs process Redis and update Supabase periodically.
+
+Configure repository variables for the project, region, artifact repository,
+stable Vercel URL, Supabase URL, and API service name. Configure secrets for
+Google Workload Identity, Vercel, the shared Upstash Redis URL, and database/LLM
+credentials as required by the workflow. Keep credentials out of Git and local
+`.env` files.
+
+The Cloud Run API uses a small database pool and one instance by default to fit
+Supabase connection limits. Cloud Run health checks use `/health`; protected
+API calls require a valid Supabase access token. The admin metrics page is
+authorized independently by the backend `ADMIN_EMAILS` or `ADMIN_USER_IDS`
+allowlist.
+
+## Scope and limitations
+
+Sift is a focused incident-investigation demo, not a complete observability
+platform. It currently does not provide high availability, alerting, tenant
+isolation, full log retention management, guaranteed causal proof, or perfect
+multi-incident attribution. Trace expansion and context size are capped, and
+LLM/provider quotas can affect latency and evaluation completeness.
+
+The evaluation set is frozen for controlled comparisons but is not a held-out
+test set. Further tuning against it can overfit the reported results.
+
+## Validation commands
+
+```bash
+docker compose config --quiet
+
+AUTH_REQUIRED=false \
 log_generator/.venv/bin/python -m pytest \
   evaluation log_collector log_consumer log_embedder log_generator log_api -q
 
-docker compose config --quiet
-~~~
-
-## Known limitations
-
-- Broad service-only queries can select one relevant trace while missing another related trace.
-- Broad temporal queries can include background noise and only partial incident coverage.
-- Similar incidents are not always disambiguated correctly.
-- When only one trace is retrieved, the answer may describe that trace confidently
-  without proving that competing incidents are absent from the full corpus.
-- When three or more traces are found, only the top two are expanded.
-- Trace expansion is capped to protect context size.
-- Severity is stored but not an exact retrieval filter.
-- Embeddings are rebuilt in batch rather than updated continuously.
-- External LLM provider limits can interrupt evaluation metrics.
-- The evidence verifier can still accept plausible causal explanations when
-  the logs show sequence but do not explicitly prove causation.
-- Evidence-reference validation confirms that a citation points to a real
-  chunk, timestamp, and service; it does not independently prove the semantic
-  truth of the claim.
-- Self-RAG retries add latency and token usage, and verifier outages currently
-  fail open by retaining the original answer.
-- The evaluation set is frozen for comparison but is not a held-out test set;
-  further tuning against it risks overfitting.
-- The Docker Compose setup is for local development, not high availability.
-- Authentication, authorization, multi-tenancy, alerting, and production scaling are not implemented.
-
-## Future work
-
-Potential next improvements are:
-
-- improve multi-trace selection for broad service queries;
-- improve temporal retrieval coverage while controlling noise;
-- add query expansion or HyDE and evaluate each independently;
-- replace truncate-and-rebuild embedding with incremental processing;
-- add operational metrics, authentication, retention, and deployment hardening.
+cd frontend && npm run build
+```
