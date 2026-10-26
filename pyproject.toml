@@ -45,6 +45,7 @@ log_embedder = [
 log_api = [
     "asyncpg>=0.29,<1",
     "fastapi>=0.115,<1",
+    "PyJWT[crypto]>=2.9,<3",
     "langchain-core>=0.3,<1",
     "langchain-openai>=0.3,<1",
     "langchain-ollama>=0.2,<1",

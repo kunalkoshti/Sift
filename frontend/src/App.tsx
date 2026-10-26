@@ -1,6 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { Session } from "@supabase/supabase-js";
+import { AuthScreen } from "./AuthScreen";
+import { getAccessToken, supabase, supabaseAuthConfigured } from "./supabase";
 
 type RetrievedChunk = {
   id: string;
@@ -221,7 +224,17 @@ function traceGroups(chunks: RetrievedChunk[]) {
   return [...groups.entries()];
 }
 
+function firstNameForSession(session: Session): string {
+  const metadata = session.user.user_metadata as Record<string, unknown>;
+  const candidate = [metadata.first_name, metadata.given_name, metadata.full_name, metadata.name]
+    .find((value) => typeof value === "string" && value.trim());
+  if (typeof candidate === "string") return candidate.trim().split(/\s+/)[0];
+  return session.user.email?.split("@")[0] || "there";
+}
+
 function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [showAuthScreen, setShowAuthScreen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(readHistory);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
@@ -235,6 +248,27 @@ function App() {
   });
 
   useEffect(() => {
+    if (!supabase) return;
+    let mounted = true;
+    void supabase.auth.getSession().then(({ data }) => {
+      if (mounted) {
+        setSession(data.session);
+        if (data.session) setShowAuthScreen(false);
+      }
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (mounted) {
+        setSession(nextSession);
+        if (nextSession) setShowAuthScreen(false);
+      }
+    });
+    return () => {
+      mounted = false;
+      listener.subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(messages));
   }, [messages]);
 
@@ -244,11 +278,15 @@ function App() {
   }, [darkMode]);
 
   useEffect(() => {
+    if (!session) return;
     let cancelled = false;
 
     async function loadLogStats() {
       try {
-        const response = await fetch(`${API_URL}/stats/log-levels`);
+        const accessToken = await getAccessToken();
+        const response = await fetch(`${API_URL}/stats/log-levels`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) {
           throw new Error(body.detail || `Stats request failed with status ${response.status}`);
@@ -274,11 +312,15 @@ function App() {
       cancelled = true;
       window.clearInterval(refreshId);
     };
-  }, []);
+  }, [session]);
 
   async function ask(rawQuestion: string) {
     const trimmed = rawQuestion.trim();
     if (!trimmed || loading) return;
+    if (!session) {
+      setShowAuthScreen(true);
+      return;
+    }
 
     const userMessage: ChatMessage = {
       id: crypto.randomUUID(),
@@ -295,7 +337,10 @@ function App() {
     try {
       const response = await fetch(`${API_URL}/ask`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${await getAccessToken()}`,
+        },
         body: JSON.stringify({ question: trimmed }),
       });
       const body = (await response.json().catch(() => ({}))) as Partial<AskResponse> & {
@@ -346,7 +391,9 @@ function App() {
           </div>
         </div>
         <div className="topbar-actions">
-          <span className="api-status"><span className="status-dot" /> API connected</span>
+          <span className="api-status">
+            <span className="status-dot" /> {session ? "API connected" : "Login required for log access"}
+          </span>
           <button className="icon-button" onClick={() => setDarkMode((value) => !value)} aria-label="Toggle dark mode">
             {darkMode ? "☼" : "☾"}
           </button>
@@ -356,15 +403,46 @@ function App() {
           <button className="text-button" onClick={() => setView((current) => current === "chat" ? "architecture" : "chat")}>
             {view === "chat" ? "Architecture" : "Back to chat"}
           </button>
+          {session ? (
+            <>
+              <span className="user-email" title={session.user.email || undefined}>
+                {session.user.email || "Signed in"}
+              </span>
+              <button
+                className="icon-button sign-out-button"
+                onClick={() => void supabase?.auth.signOut()}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <svg className="auth-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M5 3h5v2H5v14h5v2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+                  <path d="m13 7 1.4 1.4-2.6 2.6H21v2h-9.2l2.6 2.6L13 17l-5-5 5-5Z" />
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button
+              className="icon-button sign-in-button"
+              onClick={() => { setView("chat"); setShowAuthScreen(true); }}
+              aria-label="Sign in to ask Sift"
+              title="Sign in to ask Sift"
+            >
+              <svg className="auth-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 3h5a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-5v-2h5V5h-5V3Z" />
+                <path d="m11 7-1.4 1.4 2.6 2.6H3v2h9.2l-2.6 2.6L11 17l5-5-5-5Z" />
+              </svg>
+            </button>
+          )}
         </div>
       </header>
 
       <main className="workspace">
         {view === "architecture" ? <ArchitecturePage /> : <>
         <section className="chat-column">
-          {messages.length === 0 && (
+          {(!session || messages.length === 0) && (
             <section className="welcome-card">
               <div className="eyebrow">LOG QA / TRACE-AWARE RETRIEVAL</div>
+              {session && <div className="welcome-greeting">Hi, {firstNameForSession(session)}.</div>}
               <h1>Find the incident behind the noise.</h1>
               <p>
                 Ask Sift why an operation failed. Answers are grounded in retrieved log evidence,
@@ -381,23 +459,27 @@ function App() {
             </section>
           )}
 
-          <div className="message-list">
-            {messages.map((message) => (
-                <MessageCard key={message.id} message={message} onRetry={ask} />
-            ))}
-            {loading && (
-              <div className="assistant-row">
-                <div className="avatar assistant-avatar">S</div>
-                <div className="message-bubble assistant-bubble loading-bubble">
-                  <div className="loading-label">Sifting through the logs<span className="loading-dots">...</span></div>
-                  <div className="loading-bar" />
-                  <div className="loading-bar short" />
+          {session && (
+            <div className="message-list">
+              {messages.map((message) => (
+                  <MessageCard key={message.id} message={message} onRetry={ask} />
+              ))}
+              {loading && (
+                <div className="assistant-row">
+                  <div className="avatar assistant-avatar">S</div>
+                  <div className="message-bubble assistant-bubble loading-bubble">
+                    <div className="loading-label">Sifting through the logs<span className="loading-dots">...</span></div>
+                    <div className="loading-bar" />
+                    <div className="loading-bar short" />
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
-          {error && (
+          {!session && showAuthScreen && <AuthScreen configured={supabaseAuthConfigured} />}
+
+          {session && error && (
             <div className="error-card" role="alert">
               <div>
                 <strong>We couldn’t connect to Sift</strong>
@@ -409,28 +491,41 @@ function App() {
             </div>
           )}
 
-          <form className="composer" onSubmit={submit}>
-            <textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder="Ask about an incident, service, or failure..."
-              rows={2}
-              disabled={loading}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  submit(event);
-                }
-              }}
-            />
-            <div className="composer-footer">
-              <span>Enter to ask · Shift + Enter for a new line</span>
-              <button className="primary-button" type="submit" disabled={loading || !question.trim()}>
-                {loading ? "Investigating..." : "Ask Sift"}
-                <span>↗</span>
+          {session ? (
+            <form className="composer" onSubmit={submit}>
+              <textarea
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                placeholder="Ask about an incident, service, or failure..."
+                rows={2}
+                disabled={loading}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    submit(event);
+                  }
+                }}
+              />
+              <div className="composer-footer">
+                <span>Enter to ask · Shift + Enter for a new line</span>
+                <button className="primary-button" type="submit" disabled={loading || !question.trim()}>
+                  {loading ? "Investigating..." : "Ask Sift"}
+                  <span>↗</span>
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="composer auth-composer">
+              <div className="auth-composer-icon">⌁</div>
+              <div className="auth-composer-copy">
+                <strong>Sign in required to ask Sift</strong>
+                <span>Authenticate to search the indexed logs and view live corpus data.</span>
+              </div>
+              <button className="primary-button" type="button" onClick={() => setShowAuthScreen(true)}>
+                Sign in <span>↗</span>
               </button>
             </div>
-          </form>
+          )}
         </section>
 
         <aside className="side-column">
@@ -440,9 +535,11 @@ function App() {
             <div className="pipeline-line"><span className="pipeline-node done">✓</span><span>Hybrid retrieval</span><span className="pipeline-value">active</span></div>
             <div className="pipeline-line"><span className="pipeline-node done">✓</span><span>Evidence grounding</span><span className="pipeline-value">active</span></div>
           </div>
-          <LiveIndexStatus stats={logStats} />
-          <LogVolumeGraph stats={logStats} error={logStatsError} />
-          <LogLevelGraph stats={logStats} error={logStatsError} />
+          {session && <>
+            <LiveIndexStatus stats={logStats} />
+            <LogVolumeGraph stats={logStats} error={logStatsError} />
+            <LogLevelGraph stats={logStats} error={logStatsError} />
+          </>}
           <div className="side-card about-card">
             <div className="side-card-header"><span>ABOUT THIS VIEW</span></div>
             <p>Every response includes the retrieved evidence, incident traces, and time windows used to answer.</p>

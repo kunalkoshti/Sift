@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from log_api.app import ApiConfig, create_app
+from log_api.auth import AuthConfig
 from log_api.retriever import RetrievedChunk
 
 
@@ -105,6 +106,48 @@ def test_api_config_rejects_invalid_database_pool_sizes(monkeypatch):
 
     with pytest.raises(RuntimeError, match="DB_POOL_MAX_SIZE"):
         ApiConfig.from_env()
+
+
+def test_auth_config_derives_supabase_verification_endpoints(monkeypatch):
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    # app.py loads the developer's .env at import time. Clear explicit
+    # endpoint overrides so this test exercises URL derivation from SUPABASE_URL.
+    monkeypatch.delenv("SUPABASE_JWKS_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_JWT_ISSUER", raising=False)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
+
+    config = AuthConfig.from_env()
+
+    assert config.required is True
+    assert config.jwks_url == "https://example.supabase.co/auth/v1/.well-known/jwks.json"
+    assert config.issuer == "https://example.supabase.co/auth/v1"
+    assert config.audience == "authenticated"
+
+
+def test_protected_endpoints_require_a_supabase_token(monkeypatch):
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
+        app = create_app(FakeRAGService())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                return (
+                    await client.get("/health"),
+                    await client.get("/stats/log-levels"),
+                    await client.post("/ask", json={"question": "why did payments fail"}),
+                )
+
+    health, stats, ask = asyncio.run(exercise())
+
+    assert health.status_code == 200
+    assert stats.status_code == 401
+    assert ask.status_code == 401
 
 
 def test_blank_question_is_rejected():

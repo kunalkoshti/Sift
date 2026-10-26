@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from log_api.evidence_gate import EvidenceVerifier
+from log_api.auth import AuthConfig, SupabaseJWTVerifier
 from log_api.qa import QAChain, deterministic_empty_context_answer
 from log_api.retriever import HybridRetriever, RetrievedChunk, RetrieverConfig
 from log_api.scope_gate import (
@@ -83,10 +84,16 @@ class ApiConfig:
     ollama_base_url: str
     groq_base_url: str
     groq_api_key: str | None
+    auth_required: bool
+    supabase_jwks_url: str | None
+    supabase_jwt_issuer: str | None
+    supabase_jwt_audience: str
     log_level: str
 
     @classmethod
     def from_env(cls) -> ApiConfig:
+        auth_config = AuthConfig.from_env()
+
         def required(name: str) -> str:
             value = os.getenv(name)
             if not value:
@@ -221,6 +228,10 @@ class ApiConfig:
             ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
             groq_base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             groq_api_key=groq_api_key,
+            auth_required=auth_config.required,
+            supabase_jwks_url=auth_config.jwks_url,
+            supabase_jwt_issuer=auth_config.issuer,
+            supabase_jwt_audience=auth_config.audience,
             log_level=log_level,
         )
 
@@ -483,6 +494,8 @@ class RAGService:
 def create_app(service: Any | None = None) -> FastAPI:
     """Create the API; an injected service makes endpoint tests LLM-free."""
 
+    auth_verifier = SupabaseJWTVerifier(AuthConfig.from_env())
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         active_service = service or RAGService(ApiConfig.from_env())
@@ -506,7 +519,7 @@ def create_app(service: Any | None = None) -> FastAPI:
         allow_origins=configured_cors_origins(),
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
     @app.get("/health")
@@ -514,7 +527,9 @@ def create_app(service: Any | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/stats/log-levels", response_model=LogLevelStatsResponse)
-    async def log_level_stats() -> LogLevelStatsResponse:
+    async def log_level_stats(
+        _claims: dict[str, Any] | None = Depends(auth_verifier),
+    ) -> LogLevelStatsResponse:
         try:
             return LogLevelStatsResponse(
                 **await app.state.rag_service.log_level_stats()
@@ -526,7 +541,10 @@ def create_app(service: Any | None = None) -> FastAPI:
             raise HTTPException(status_code=502, detail="Stats request failed") from exc
 
     @app.post("/ask", response_model=AskResponse)
-    async def ask(request: AskRequest) -> AskResponse:
+    async def ask(
+        request: AskRequest,
+        _claims: dict[str, Any] | None = Depends(auth_verifier),
+    ) -> AskResponse:
         question = request.question.strip()
         if not question:
             raise HTTPException(status_code=422, detail="question must not be blank")

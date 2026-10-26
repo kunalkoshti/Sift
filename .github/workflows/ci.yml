@@ -100,6 +100,7 @@ jobs:
       ARTIFACT_REPOSITORY: ${{ vars.ARTIFACT_REPOSITORY || 'sift' }}
       LOG_API_SERVICE: ${{ vars.LOG_API_SERVICE || 'sift-log-api' }}
       VERCEL_FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL }}
+      SUPABASE_URL: ${{ vars.SUPABASE_URL }}
 
     steps:
       - name: Check out repository
@@ -119,6 +120,7 @@ jobs:
           test -n "${GCP_PROJECT_ID}"
           test -n "${GCP_REGION}"
           test -n "${VERCEL_FRONTEND_URL}"
+          test -n "${SUPABASE_URL}"
           test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
           test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}"
 
@@ -153,10 +155,12 @@ jobs:
 
       - name: Set API CORS for the Vercel production URL
         run: |
+          SUPABASE_JWKS_URL="${SUPABASE_URL%/}/auth/v1/.well-known/jwks.json"
+          SUPABASE_JWT_ISSUER="${SUPABASE_URL%/}/auth/v1"
           gcloud run services update "${LOG_API_SERVICE}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${GCP_REGION}" \
-            --update-env-vars="CORS_ORIGINS=${VERCEL_FRONTEND_URL}" \
+            --update-env-vars="^|^CORS_ORIGINS=${VERCEL_FRONTEND_URL}|AUTH_REQUIRED=true|SUPABASE_URL=${SUPABASE_URL}|SUPABASE_JWKS_URL=${SUPABASE_JWKS_URL}|SUPABASE_JWT_ISSUER=${SUPABASE_JWT_ISSUER}|SUPABASE_JWT_AUDIENCE=authenticated" \
             --quiet
 
       - name: Check deployed API

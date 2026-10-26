@@ -204,6 +204,7 @@ GCP_REGION
 ARTIFACT_REPOSITORY       # optional; defaults to sift
 LOG_API_SERVICE           # optional; defaults to sift-log-api
 VERCEL_FRONTEND_URL       # stable https://...vercel.app production URL
+SUPABASE_URL              # https://<project-ref>.supabase.co
 ~~~
 
 Configure these GitHub Actions secrets:
@@ -220,6 +221,21 @@ The Vercel project should use `frontend` as its root directory and have
 `VITE_API_URL` configured for the Production environment. The Cloud Run service must
 already have its runtime settings and secrets, including `POSTGRES_DSN`, `LLM_MODEL`,
 and the LLM API key.
+
+The frontend supports Supabase email/password and Google OAuth sign-in. Configure
+both providers in Supabase Authentication, add the local and Vercel URLs to the
+allowed redirect URLs, and set these Vercel Production environment variables:
+
+~~~text
+VITE_API_URL
+VITE_SUPABASE_URL
+VITE_SUPABASE_PUBLISHABLE_KEY   # the older dashboard calls this the anon key
+~~~
+
+When the API is deployed by the workflow, it sets `AUTH_REQUIRED=true` and
+derives the Supabase JWKS and issuer URLs from `SUPABASE_URL`. `/health` remains
+public for Cloud Run probes; `/ask` and `/stats/log-levels` require a valid
+Supabase access token. The API does not receive or store the Google client secret.
 
 ## Evaluation
 
