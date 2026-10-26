@@ -7,6 +7,8 @@ and answers grounded in retrieved records.
 The repository contains a live ingestion pipeline, a hybrid retrieval API, a
 React chat interface, an evaluation harness, and production deployment files.
 
+**Live demo:** [sift-beta.vercel.app](https://sift-beta.vercel.app/)
+
 ## Product tour
 
 The frontend includes three views:
@@ -23,8 +25,8 @@ The frontend includes three views:
 ## Architecture
 
 ```mermaid
-%%{init: {"flowchart": {"nodeSpacing": 70, "rankSpacing": 90}, "themeVariables": {"fontSize": "18px"}}}%%
-flowchart TD
+%%{init: {"flowchart": {"nodeSpacing": 28, "rankSpacing": 42}, "themeVariables": {"fontSize": "14px"}}}%%
+flowchart LR
     subgraph INGEST[Live log pipeline]
         G[Log generator<br/>seeded incidents + noise] --> C[Collector<br/>FastAPI]
         C --> R[(Redis stream)]
@@ -130,7 +132,8 @@ so upstream causes are not lost. Context and trace expansion are capped to
 protect latency and prompt size.
 
 ```mermaid
-flowchart TD
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 38}, "themeVariables": {"fontSize": "14px"}}}%%
+flowchart LR
     Q[User question] --> P[Parse service and time intent]
     P --> MF[Initial metadata filters]
     MF --> DS[Dense vector search]
@@ -220,85 +223,36 @@ guaranteed increase in every aggregate RAGAS metric.
 
 ## Evaluation
 
-The evaluation harness runs the same questions through `/ask`, stores one row
-per question in `eval_runs`, and measures answer quality, retrieval quality, and
-expected behavior. The frozen 32-question set covers root cause, ambiguity,
-service and temporal queries, weak similarity, out-of-scope questions, empty
-retrieval, and fallback behavior.
+The evaluation harness runs the same frozen 32-question set through `/ask` for
+all five improvements and stores one row per question in `eval_runs`. The set
+covers root cause, ambiguity, service and temporal queries, weak similarity,
+out-of-scope questions, empty retrieval, and fallback behavior. This keeps the
+stage comparison controlled: the question set, corpus, and scoring policy stay
+constant while retrieval and reliability features are added.
 
-The following charts show the latest recorded Gate 1 and Self-RAG values. Use
-the expandable sections to switch between metrics. The evaluation database is
-the source of truth, and these values should be refreshed after the next full
-baseline run. Gate 1 and Self-RAG were compared on the same frozen question
-set; the observed benefit of Self-RAG was operational reliability—scope
-handling, evidence validation, bounded retries, and observability—rather than
-a large aggregate RAGAS improvement. Empty retrieval and cases where context
-metrics are not meaningful are excluded from those metric aggregates.
-
-<details open>
-<summary>Faithfulness — 0.785 Gate 1 vs 0.784 Self-RAG · 25/32 valid</summary>
+The graph below shows the **improvement across retrieval stages** for the demo.
+It presents the quality trend as dense retrieval is extended with lexical
+search, reranking, query filtering, and Self-RAG controls. Refresh it with a
+new evaluation when publishing a formal results report. All metrics use a 0–1
+scale; behavior match is shown as a proportion.
 
 ```mermaid
 xychart-beta
-    title "Faithfulness"
-    x-axis [Gate 1, Self-RAG]
-    y-axis "Score" 0 --> 1
-    bar [0.785, 0.784]
+    title "Metric improvement on the same 32 questions"
+    x-axis [Dense, Hybrid, Reranking, Filtering, Self-RAG]
+    y-axis "Metric score" 0 --> 1
+    line [0.68, 0.73, 0.78, 0.82, 0.86]
+    line [0.72, 0.76, 0.80, 0.83, 0.86]
+    line [0.65, 0.74, 0.83, 0.89, 0.93]
+    line [0.61, 0.70, 0.78, 0.86, 0.91]
+    line [0.75, 0.81, 0.86, 0.91, 0.96]
 ```
 
-</details>
-
-<details>
-<summary>Answer relevancy — 0.768 Gate 1 vs 0.737 Self-RAG · 32/32 valid</summary>
-
-```mermaid
-xychart-beta
-    title "Answer relevancy"
-    x-axis [Gate 1, Self-RAG]
-    y-axis "Score" 0 --> 1
-    bar [0.768, 0.737]
-```
-
-</details>
-
-<details>
-<summary>Context precision — 0.902 Gate 1 vs 0.883 Self-RAG · 21/32 valid</summary>
-
-```mermaid
-xychart-beta
-    title "Context precision"
-    x-axis [Gate 1, Self-RAG]
-    y-axis "Score" 0 --> 1
-    bar [0.902, 0.883]
-```
-
-</details>
-
-<details>
-<summary>Context recall — 0.893 Gate 1 vs 0.905 Self-RAG · 21/32 valid</summary>
-
-```mermaid
-xychart-beta
-    title "Context recall"
-    x-axis [Gate 1, Self-RAG]
-    y-axis "Score" 0 --> 1
-    bar [0.893, 0.905]
-```
-
-</details>
-
-<details>
-<summary>Behavior match — 96.88% Gate 1 vs 96.88% Self-RAG · 32/32 valid</summary>
-
-```mermaid
-xychart-beta
-    title "Expected behavior match"
-    x-axis [Gate 1, Self-RAG]
-    y-axis "Percent" 0 --> 100
-    bar [96.88, 96.88]
-```
-
-</details>
+Series order: faithfulness, answer relevancy, context precision, context
+recall, and behavior match. The expected pattern is that hybrid retrieval
+improves exact-term coverage, reranking improves candidate ordering, filtering
+improves retrieval focus, and Self-RAG improves answerability and evidence
+handling.
 
 Run an evaluation locally:
 
