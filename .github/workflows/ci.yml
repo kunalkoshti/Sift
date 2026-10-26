@@ -35,6 +35,7 @@ jobs:
               - 'pyproject.toml'
               - 'cloudbuild.yaml'
               - '.env.example'
+              - '.github/workflows/ci.yml'
 
   test:
     runs-on: ubuntu-latest
@@ -146,6 +147,8 @@ jobs:
 
       - name: Deploy log-api
         run: |
+          SUPABASE_JWKS_URL="${SUPABASE_URL%/}/auth/v1/.well-known/jwks.json"
+          SUPABASE_JWT_ISSUER="${SUPABASE_URL%/}/auth/v1"
           gcloud run deploy "${LOG_API_SERVICE}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${GCP_REGION}" \
@@ -154,15 +157,6 @@ jobs:
             --port 8080 \
             --max 1 \
             --allow-unauthenticated \
-            --quiet
-
-      - name: Set API CORS for the Vercel production URL
-        run: |
-          SUPABASE_JWKS_URL="${SUPABASE_URL%/}/auth/v1/.well-known/jwks.json"
-          SUPABASE_JWT_ISSUER="${SUPABASE_URL%/}/auth/v1"
-          gcloud run services update "${LOG_API_SERVICE}" \
-            --project "${GCP_PROJECT_ID}" \
-            --region "${GCP_REGION}" \
             --update-env-vars="^|^CORS_ORIGINS=${VERCEL_FRONTEND_URL}|AUTH_REQUIRED=true|SUPABASE_URL=${SUPABASE_URL}|SUPABASE_JWKS_URL=${SUPABASE_JWKS_URL}|SUPABASE_JWT_ISSUER=${SUPABASE_JWT_ISSUER}|SUPABASE_JWT_AUDIENCE=authenticated|REDIS_URL=${LIVE_REDIS_URL}|REDIS_RATE_LIMIT_PREFIX=sift:ratelimit|METRICS_REDIS_PREFIX=sift:metrics|METRICS_RETENTION_SECONDS=604800|ADMIN_METRICS_WINDOW_MINUTES=1440|ADMIN_EMAILS=${ADMIN_EMAILS}|RATE_LIMIT_REQUESTS=30|RATE_LIMIT_WINDOW_SECONDS=60|MAX_REQUEST_BYTES=16384" \
             --quiet
 
