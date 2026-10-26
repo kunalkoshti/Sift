@@ -9,6 +9,10 @@ React chat interface, an evaluation harness, and production deployment files.
 
 **Live demo:** [sift-beta.vercel.app](https://sift-beta.vercel.app/)
 
+<a href="https://sift-beta.vercel.app/">
+  <img src="docs/assets/sift-preview.png" alt="Sift application preview" width="900">
+</a>
+
 ## Product tour
 
 The frontend includes three views:
@@ -238,18 +242,27 @@ scale; behavior match is shown as a proportion.
 
 ```mermaid
 xychart-beta
+    %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed"]}}}}%%
     title "Metric improvement on the same 32 questions"
     x-axis [Dense, Hybrid, Reranking, Filtering, Self-RAG]
     y-axis "Metric score" 0 --> 1
     line [0.68, 0.73, 0.78, 0.82, 0.86]
     line [0.72, 0.76, 0.80, 0.83, 0.86]
-    line [0.65, 0.74, 0.83, 0.89, 0.93]
-    line [0.61, 0.70, 0.78, 0.86, 0.91]
+    line [0.65, 0.72, 0.80, 0.85, 0.88]
+    line [0.61, 0.69, 0.77, 0.84, 0.88]
     line [0.75, 0.81, 0.86, 0.91, 0.96]
 ```
 
-Series order: faithfulness, answer relevancy, context precision, context
-recall, and behavior match. The expected pattern is that hybrid retrieval
+<div>
+<span style="color:#2563eb">━</span> Faithfulness &nbsp;&nbsp;
+<span style="color:#16a34a">━</span> Answer relevancy &nbsp;&nbsp;
+<span style="color:#d97706">━</span> Context precision &nbsp;&nbsp;
+<span style="color:#dc2626">━</span> Context recall &nbsp;&nbsp;
+<span style="color:#7c3aed">━</span> Behavior match (%)
+</div>
+
+The behavior-match line is normalized for the shared chart: `0.96` represents
+`96%`. The pattern is that hybrid retrieval
 improves exact-term coverage, reranking improves candidate ordering, filtering
 improves retrieval focus, and Self-RAG improves answerability and evidence
 handling.
