@@ -101,6 +101,8 @@ jobs:
       LOG_API_SERVICE: ${{ vars.LOG_API_SERVICE || 'sift-log-api' }}
       VERCEL_FRONTEND_URL: ${{ vars.VERCEL_FRONTEND_URL }}
       SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+      LIVE_REDIS_URL: ${{ secrets.LIVE_REDIS_URL }}
+      ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
 
     steps:
       - name: Check out repository
@@ -121,6 +123,7 @@ jobs:
           test -n "${GCP_REGION}"
           test -n "${VERCEL_FRONTEND_URL}"
           test -n "${SUPABASE_URL}"
+          test -n "${LIVE_REDIS_URL}"
           test -n "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
           test -n "${{ secrets.GCP_SERVICE_ACCOUNT }}"
 
@@ -160,7 +163,7 @@ jobs:
           gcloud run services update "${LOG_API_SERVICE}" \
             --project "${GCP_PROJECT_ID}" \
             --region "${GCP_REGION}" \
-            --update-env-vars="^|^CORS_ORIGINS=${VERCEL_FRONTEND_URL}|AUTH_REQUIRED=true|SUPABASE_URL=${SUPABASE_URL}|SUPABASE_JWKS_URL=${SUPABASE_JWKS_URL}|SUPABASE_JWT_ISSUER=${SUPABASE_JWT_ISSUER}|SUPABASE_JWT_AUDIENCE=authenticated" \
+            --update-env-vars="^|^CORS_ORIGINS=${VERCEL_FRONTEND_URL}|AUTH_REQUIRED=true|SUPABASE_URL=${SUPABASE_URL}|SUPABASE_JWKS_URL=${SUPABASE_JWKS_URL}|SUPABASE_JWT_ISSUER=${SUPABASE_JWT_ISSUER}|SUPABASE_JWT_AUDIENCE=authenticated|REDIS_URL=${LIVE_REDIS_URL}|REDIS_RATE_LIMIT_PREFIX=sift:ratelimit|METRICS_REDIS_PREFIX=sift:metrics|METRICS_RETENTION_SECONDS=604800|ADMIN_METRICS_WINDOW_MINUTES=1440|ADMIN_EMAILS=${ADMIN_EMAILS}|RATE_LIMIT_REQUESTS=30|RATE_LIMIT_WINDOW_SECONDS=60|MAX_REQUEST_BYTES=16384" \
             --quiet
 
       - name: Check deployed API

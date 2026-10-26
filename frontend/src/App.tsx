@@ -54,6 +54,29 @@ type LogLevelStats = {
   intervals: LogLevelInterval[];
 };
 
+type ProductionMetricPoint = {
+  start: number;
+  requests: number;
+  errors: number;
+  rate_limited: number;
+  payload_rejected: number;
+  average_latency_ms: number;
+};
+
+type ProductionMetrics = {
+  status: "ready";
+  window_minutes: number;
+  series: ProductionMetricPoint[];
+  totals: {
+    requests: number;
+    errors: number;
+    rate_limited: number;
+    payload_rejected: number;
+    average_latency_ms: number;
+    unique_visitors: number;
+  };
+};
+
 type ChatMessage = {
   id: string;
   role: "user" | "assistant";
@@ -85,6 +108,35 @@ const EXAMPLE_QUESTIONS = [
 ];
 
 const STORAGE_KEY = "sift-chat-history";
+const ADMIN_EMAILS = new Set(
+  String(import.meta.env.VITE_ADMIN_EMAILS || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
+const ADMIN_USER_IDS = new Set(
+  String(import.meta.env.VITE_ADMIN_USER_IDS || "")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean),
+);
+
+class ApiRequestError extends Error {
+  status: number;
+  retryAfterSeconds: number | null;
+
+  constructor(message: string, status: number, retryAfter: string | null) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.retryAfterSeconds = retryAfter ? Number.parseInt(retryAfter, 10) : null;
+  }
+}
+
+type RequestErrorState = {
+  message: string;
+  status?: number;
+};
 
 function readHistory(): ChatMessage[] {
   try {
@@ -107,17 +159,44 @@ function readHistory(): ChatMessage[] {
   }
 }
 
-function friendlyRequestError(error: string): string {
-  if (error === "Failed to fetch") {
+function friendlyRequestError(error: unknown): string {
+  const status = error instanceof ApiRequestError ? error.status : undefined;
+  const retryAfter = error instanceof ApiRequestError ? error.retryAfterSeconds : null;
+
+  if (status === 429) {
+    if (retryAfter && Number.isFinite(retryAfter)) {
+      const unit = retryAfter === 1 ? "second" : "seconds";
+      return `Sift is receiving many requests right now. Please try again in about ${retryAfter} ${unit}.`;
+    }
+    return "Sift is receiving many requests right now. Please wait a moment and try again.";
+  }
+  if (status === 413) {
+    return "That request is too large. Please shorten your question and try again.";
+  }
+  if (status === 401) {
+    return "Your session has expired. Please sign in again to continue.";
+  }
+  if (status === 403) {
+    return "You do not have permission to access Sift. Please check your account.";
+  }
+  if (status === 503) {
+    return "Sift is temporarily unavailable. Please try again in a moment.";
+  }
+  if (status === 502) {
+    return "Sift could not complete that request. Please try again in a moment.";
+  }
+  if (error instanceof Error && error.message === "Failed to fetch") {
     return "We couldn't connect to the log API. Check your connection and try again.";
   }
-  if (error.includes("status 502") || error.includes("status 503")) {
-    return "The log API is temporarily unavailable. Please try again in a moment.";
-  }
-  if (error.includes("status 401") || error.includes("status 403")) {
-    return "The log API rejected this request. Check the service access settings.";
-  }
   return "Something went wrong while processing your question. Please try again.";
+}
+
+function requestErrorTitle(status?: number): string {
+  if (status === 429) return "Sift is busy";
+  if (status === 413) return "Request too large";
+  if (status === 401 || status === 403) return "Sign-in required";
+  if (status === 502 || status === 503) return "Sift is temporarily unavailable";
+  return "We couldn't complete that request";
 }
 
 function formatWindow(start: string, end: string): string {
@@ -232,17 +311,25 @@ function firstNameForSession(session: Session): string {
   return session.user.email?.split("@")[0] || "there";
 }
 
+function isAdminSession(session: Session): boolean {
+  return (
+    ADMIN_USER_IDS.has(session.user.id.toLowerCase()) ||
+    Boolean(session.user.email && ADMIN_EMAILS.has(session.user.email.toLowerCase()))
+  );
+}
+
 function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [showAuthScreen, setShowAuthScreen] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>(readHistory);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<RequestErrorState | null>(null);
   const [lastQuestion, setLastQuestion] = useState("");
   const [logStats, setLogStats] = useState<LogLevelStats | null>(null);
   const [logStatsError, setLogStatsError] = useState<string | null>(null);
-  const [view, setView] = useState<"chat" | "architecture">("chat");
+  const [view, setView] = useState<"chat" | "architecture" | "metrics">("chat");
+  const isAdmin = session ? isAdminSession(session) : false;
   const [darkMode, setDarkMode] = useState(() => {
     return window.localStorage.getItem("sift-theme") === "dark";
   });
@@ -289,7 +376,11 @@ function App() {
         });
         const body = await response.json().catch(() => ({}));
         if (!response.ok) {
-          throw new Error(body.detail || `Stats request failed with status ${response.status}`);
+          throw new ApiRequestError(
+            body.detail || `Stats request failed with status ${response.status}`,
+            response.status,
+            response.headers.get("Retry-After"),
+          );
         }
         if (!cancelled) {
           setLogStats(body as LogLevelStats);
@@ -297,11 +388,7 @@ function App() {
         }
       } catch (statsRequestError) {
         if (!cancelled) {
-          setLogStatsError(
-            statsRequestError instanceof Error
-              ? statsRequestError.message
-              : "Unable to load corpus statistics",
-          );
+          setLogStatsError(friendlyRequestError(statsRequestError));
         }
       }
     }
@@ -313,6 +400,10 @@ function App() {
       window.clearInterval(refreshId);
     };
   }, [session]);
+
+  useEffect(() => {
+    if (view === "metrics" && !isAdmin) setView("chat");
+  }, [isAdmin, view]);
 
   async function ask(rawQuestion: string) {
     const trimmed = rawQuestion.trim();
@@ -347,7 +438,11 @@ function App() {
         detail?: string;
       };
       if (!response.ok) {
-        throw new Error(body.detail || `Request failed with status ${response.status}`);
+        throw new ApiRequestError(
+          body.detail || `Request failed with status ${response.status}`,
+          response.status,
+          response.headers.get("Retry-After"),
+        );
       }
 
       const assistantMessage: ChatMessage = {
@@ -362,9 +457,11 @@ function App() {
       };
       setMessages((current) => [...current, assistantMessage]);
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : "Request failed";
       console.error("Sift request failed", requestError);
-      setError(message);
+      setError({
+        message: friendlyRequestError(requestError),
+        status: requestError instanceof ApiRequestError ? requestError.status : undefined,
+      });
     } finally {
       setLoading(false);
     }
@@ -397,12 +494,45 @@ function App() {
           <button className="icon-button" onClick={() => setDarkMode((value) => !value)} aria-label="Toggle dark mode">
             {darkMode ? "☼" : "☾"}
           </button>
-          <button className="text-button" onClick={clearChat} disabled={!messages.length}>
-            Clear chat
-          </button>
-          <button className="text-button" onClick={() => setView((current) => current === "chat" ? "architecture" : "chat")}>
-            {view === "chat" ? "Architecture" : "Back to chat"}
-          </button>
+          {view === "chat" && (
+            <button className="text-button" onClick={clearChat} disabled={!messages.length}>
+              Clear chat
+            </button>
+          )}
+          {view === "chat" && (
+            <>
+              <button className="text-button" onClick={() => setView("architecture")}>
+                Architecture
+              </button>
+              {isAdmin && (
+                <button className="text-button admin-metrics-button" onClick={() => setView("metrics")}>
+                  Production metrics
+                </button>
+              )}
+            </>
+          )}
+          {view === "architecture" && (
+            <>
+              <button className="text-button" onClick={() => setView("chat")}>
+                Back to chat
+              </button>
+              {isAdmin && (
+                <button className="text-button admin-metrics-button" onClick={() => setView("metrics")}>
+                  Production metrics
+                </button>
+              )}
+            </>
+          )}
+          {view === "metrics" && (
+            <>
+              <button className="text-button" onClick={() => setView("architecture")}>
+                Architecture
+              </button>
+              <button className="text-button" onClick={() => setView("chat")}>
+                Back to chat
+              </button>
+            </>
+          )}
           {session ? (
             <>
               <span className="user-email" title={session.user.email || undefined}>
@@ -437,7 +567,7 @@ function App() {
       </header>
 
       <main className="workspace">
-        {view === "architecture" ? <ArchitecturePage /> : <>
+        {view === "architecture" ? <ArchitecturePage /> : view === "metrics" ? <AdminMetricsPage session={session} /> : <>
         <section className="chat-column">
           {(!session || messages.length === 0) && (
             <section className="welcome-card">
@@ -482,8 +612,8 @@ function App() {
           {session && error && (
             <div className="error-card" role="alert">
               <div>
-                <strong>We couldn’t connect to Sift</strong>
-                <span>{friendlyRequestError(error)}</span>
+                <strong>{requestErrorTitle(error.status)}</strong>
+                <span>{error.message}</span>
               </div>
               <button className="secondary-button" onClick={() => void ask(lastQuestion)} disabled={!lastQuestion || loading}>
                 Try again
@@ -868,6 +998,129 @@ function LogLevelGraph({ stats, error }: { stats: LogLevelStats | null; error: s
       <p className="placeholder-note">All incidents and background noise · refreshes every 15 seconds.</p>
       </div>
     </>
+  );
+}
+
+function AdminMetricsPage({ session }: { session: Session | null }) {
+  const [metrics, setMetrics] = useState<ProductionMetrics | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+
+    async function loadMetrics() {
+      try {
+        const accessToken = await getAccessToken();
+        const response = await fetch(`${API_URL}/admin/metrics`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new ApiRequestError(
+            body.detail || `Metrics request failed with status ${response.status}`,
+            response.status,
+            response.headers.get("Retry-After"),
+          );
+        }
+        if (!cancelled) {
+          setMetrics(body as ProductionMetrics);
+          setError(null);
+        }
+      } catch (requestError) {
+        if (!cancelled) setError(friendlyRequestError(requestError));
+      }
+    }
+
+    void loadMetrics();
+    const refreshId = window.setInterval(() => void loadMetrics(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(refreshId);
+    };
+  }, [session]);
+
+  const points = (metrics?.series || []).filter(
+    (point) => point.requests || point.errors || point.rate_limited || point.payload_rejected,
+  );
+  const maximumRequests = Math.max(...points.map((point) => point.requests), 1);
+  const timeLabelStep = Math.max(1, Math.ceil(points.length / 7));
+  const totals = metrics?.totals;
+
+  return (
+    <section className="admin-metrics-page">
+      <div className="admin-metrics-hero">
+        <div>
+          <div className="eyebrow">SIFT / PRIVATE OPERATIONS</div>
+          <h1>Production metrics.</h1>
+          <p>Request traffic and API protection signals from the Redis-backed metrics store.</p>
+        </div>
+        <span className="admin-badge">ADMIN ONLY</span>
+      </div>
+
+      {error && (
+        <div className="error-card admin-metrics-error" role="alert">
+          <div>
+            <strong>Metrics are temporarily unavailable</strong>
+            <span>{error}</span>
+          </div>
+        </div>
+      )}
+
+      {metrics && (
+        <>
+          <div className="metrics-summary-grid">
+            <div className="metrics-summary-card"><span>Total requests</span><strong>{totals?.requests.toLocaleString()}</strong><small>Since metrics collection began</small></div>
+            <div className="metrics-summary-card"><span>Server errors</span><strong>{totals?.errors.toLocaleString()}</strong><small>HTTP 5xx responses</small></div>
+            <div className="metrics-summary-card"><span>Rate limited</span><strong>{totals?.rate_limited.toLocaleString()}</strong><small>HTTP 429 responses</small></div>
+            <div className="metrics-summary-card"><span>Average latency</span><strong>{totals?.average_latency_ms.toFixed(0)} ms</strong><small>All recorded requests</small></div>
+            <div className="metrics-summary-card"><span>Unique visitors</span><strong>{totals?.unique_visitors.toLocaleString()}</strong><small>Authenticated users in this window</small></div>
+          </div>
+
+          <section className="metrics-panel">
+            <div className="metrics-panel-header">
+              <div>
+                <div className="section-label">REQUEST TRAFFIC</div>
+                <p>Non-empty minute buckets in the last {Math.round((metrics.window_minutes || 0) / 60)} hours.</p>
+              </div>
+              <span className="live-pill">REDIS · LIVE</span>
+            </div>
+            {points.length ? (
+              <div className="metrics-bar-chart" aria-label="Request traffic over time">
+                {points.map((point, index) => {
+                  const showTimeLabel =
+                    index === 0 || index === points.length - 1 || index % timeLabelStep === 0;
+                  const timestamp = new Date(point.start * 1000);
+                  return (
+                  <div className="metrics-bar-column" key={point.start} title={`${timestamp.toLocaleString()} · ${point.requests} requests`}>
+                    <div className="metrics-bar-stack">
+                      <span className="metrics-bar requests" style={{ height: `${Math.max(8, (point.requests / maximumRequests) * 150)}px` }} />
+                      {point.errors > 0 && <span className="metrics-bar errors" style={{ height: `${Math.max(5, (point.errors / maximumRequests) * 150)}px` }} />}
+                    </div>
+                    <small className={showTimeLabel ? "metrics-time-label" : "metrics-time-label metrics-time-label-hidden"}>
+                      {showTimeLabel ? timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "·"}
+                    </small>
+                  </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="empty-evidence">No production requests have been recorded yet.</div>
+            )}
+            <div className="metrics-legend"><span><i className="metrics-legend-dot requests" /> Requests</span><span><i className="metrics-legend-dot errors" /> Server errors</span></div>
+          </section>
+
+          <section className="metrics-panel metrics-breakdown">
+            <div className="section-label">PROTECTION EVENTS</div>
+            <div className="metrics-breakdown-grid">
+              <div><strong>{totals?.rate_limited.toLocaleString()}</strong><span>Rate-limited requests</span></div>
+              <div><strong>{totals?.payload_rejected.toLocaleString()}</strong><span>Oversized payloads</span></div>
+              <div><strong>{points.length}</strong><span>Active time buckets</span></div>
+            </div>
+          </section>
+        </>
+      )}
+    </section>
   );
 }
 

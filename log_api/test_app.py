@@ -58,9 +58,25 @@ class FakeRAGService:
         }
 
 
+class FakeRateLimiter:
+    def __init__(self, limit: int | None = None):
+        self.limit = limit
+        self.calls = 0
+        self.config = type("Config", (), {"requests": limit or 30})()
+
+    async def check(self, key: str) -> tuple[bool, int]:
+        self.calls += 1
+        if self.limit is not None and self.calls > self.limit:
+            return False, 60
+        return True, 0
+
+    async def close(self):
+        return None
+
+
 def test_health_and_ask_endpoint():
     async def exercise() -> httpx.Response:
-        app = create_app(FakeRAGService())
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -69,6 +85,8 @@ def test_health_and_ask_endpoint():
             ) as client:
                 health = await client.get("/health")
                 assert health.json() == {"status": "ok"}
+                metrics = await client.get("/metrics")
+                assert metrics.status_code == 200
                 stats = await client.get("/stats/log-levels")
                 assert stats.status_code == 200
                 assert stats.json()["raw_logs"] == 1117
@@ -86,6 +104,63 @@ def test_health_and_ask_endpoint():
     assert body["response_type"] == "supported"
     assert len(body["retrieved_chunks"]) == 1
     assert body["retrieved_chunks"][0]["trace_ids"] == ["trace-payment-timeout-001"]
+
+
+def test_rate_limit_returns_429_with_retry_header(monkeypatch):
+    _set_minimum_api_config(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("RATE_LIMIT_REQUESTS", "1")
+    monkeypatch.setenv("RATE_LIMIT_WINDOW_SECONDS", "60")
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter(limit=1))
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                first = await client.post(
+                    "/ask", json={"question": "why did payments fail"}
+                )
+                second = await client.post(
+                    "/ask", json={"question": "why did payments fail"}
+                )
+                return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.headers["retry-after"]
+    assert second.json()["detail"] == "Rate limit exceeded. Please retry later."
+
+
+def test_payload_size_limit_returns_413_and_records_metric(monkeypatch):
+    _set_minimum_api_config(monkeypatch)
+    monkeypatch.setenv("AUTH_REQUIRED", "false")
+    monkeypatch.setenv("MAX_REQUEST_BYTES", "64")
+
+    async def exercise() -> tuple[httpx.Response, httpx.Response]:
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="http://testserver",
+            ) as client:
+                rejected = await client.post(
+                    "/ask", json={"question": "x" * 100}
+                )
+                metrics = await client.get("/metrics")
+                return rejected, metrics
+
+    rejected, metrics = asyncio.run(exercise())
+
+    assert rejected.status_code == 413
+    assert rejected.headers["x-max-request-bytes"] == "64"
+    assert rejected.json()["detail"] == "Request payload is too large"
+    assert metrics.json()["payload_rejected"] == 1
 
 
 def test_api_config_reads_database_pool_sizes(monkeypatch):
@@ -130,7 +205,7 @@ def test_protected_endpoints_require_a_supabase_token(monkeypatch):
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
 
     async def exercise() -> tuple[httpx.Response, httpx.Response, httpx.Response]:
-        app = create_app(FakeRAGService())
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -152,7 +227,7 @@ def test_protected_endpoints_require_a_supabase_token(monkeypatch):
 
 def test_blank_question_is_rejected():
     async def exercise() -> httpx.Response:
-        app = create_app(FakeRAGService())
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -170,7 +245,7 @@ def test_cors_allows_configured_frontend_origin(monkeypatch):
     monkeypatch.setenv("CORS_ORIGINS", "https://frontend.example")
 
     async def exercise() -> httpx.Response:
-        app = create_app(FakeRAGService())
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
@@ -196,7 +271,7 @@ def test_cors_does_not_allow_unconfigured_origin(monkeypatch):
     monkeypatch.setenv("CORS_ORIGINS", "https://frontend.example")
 
     async def exercise() -> httpx.Response:
-        app = create_app(FakeRAGService())
+        app = create_app(FakeRAGService(), rate_limiter=FakeRateLimiter())
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
