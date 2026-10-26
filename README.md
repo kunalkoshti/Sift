@@ -242,7 +242,7 @@ scale; behavior match is shown as a proportion.
 
 ```mermaid
 xychart-beta
-    %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed"]}}}}%%
+    %%{init: {"themeVariables": {"xyChart": {"plotColorPalette": "#2563eb,#16a34a,#d97706,#dc2626,#7c3aed"}}}}%%
     title "Metric improvement on the same 32 questions"
     x-axis [Dense, Hybrid, Reranking, Filtering, Self-RAG]
     y-axis "Metric score" 0 --> 1
