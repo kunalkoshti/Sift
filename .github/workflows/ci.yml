@@ -35,6 +35,7 @@ jobs:
               - 'pyproject.toml'
               - 'cloudbuild.yaml'
               - '.env.example'
+              - '.github/workflows/ci.yml'
 
   test:
     runs-on: ubuntu-latest
