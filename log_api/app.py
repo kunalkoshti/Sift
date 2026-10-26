@@ -16,12 +16,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from log_api.evidence_gate import EvidenceVerifier
-from log_api.auth import AuthConfig, SupabaseJWTVerifier
+from log_api.auth import AuthConfig, SupabaseJWTVerifier, create_admin_dependency
 from log_api.qa import QAChain, deterministic_empty_context_answer
 from log_api.retriever import HybridRetriever, RetrievedChunk, RetrieverConfig
 from log_api.scope_gate import (
     deterministic_scope_answer,
     evaluate_scope_gate,
+)
+from log_api.protection import (
+    PayloadSizeLimitMiddleware,
+    RateLimitConfig,
+    RedisRateLimiter,
+    RequestMetrics,
+    RequestMetricsMiddleware,
+    RedisMetricsStore,
+    create_rate_limit_dependency,
 )
 
 
@@ -288,6 +297,41 @@ class LogLevelStatsResponse(BaseModel):
     intervals: list[LogLevelInterval]
 
 
+class MetricsResponse(BaseModel):
+    status: Literal["ready"]
+    uptime_seconds: float
+    requests_total: int
+    rate_limited: int
+    payload_rejected: int
+    status_codes: dict[str, int]
+    routes: dict[str, int]
+
+
+class ProductionMetricPoint(BaseModel):
+    start: int
+    requests: int
+    errors: int
+    rate_limited: int
+    payload_rejected: int
+    average_latency_ms: float
+
+
+class ProductionMetricTotals(BaseModel):
+    requests: int
+    errors: int
+    rate_limited: int
+    payload_rejected: int
+    average_latency_ms: float
+    unique_visitors: int
+
+
+class ProductionMetricsResponse(BaseModel):
+    status: Literal["ready"]
+    window_minutes: int
+    series: list[ProductionMetricPoint]
+    totals: ProductionMetricTotals
+
+
 def classify_response_type(
     *,
     scope_in_scope: bool,
@@ -491,10 +535,36 @@ class RAGService:
         )
 
 
-def create_app(service: Any | None = None) -> FastAPI:
+def create_app(
+    service: Any | None = None,
+    *,
+    rate_limiter: Any | None = None,
+) -> FastAPI:
     """Create the API; an injected service makes endpoint tests LLM-free."""
 
     auth_verifier = SupabaseJWTVerifier(AuthConfig.from_env())
+    rate_limit_config = RateLimitConfig.from_env()
+    max_request_bytes = int(os.getenv("MAX_REQUEST_BYTES", "16384"))
+    if max_request_bytes <= 0:
+        raise RuntimeError("MAX_REQUEST_BYTES must be positive")
+    active_rate_limiter = rate_limiter or RedisRateLimiter(rate_limit_config)
+    metrics_store = None
+    if getattr(active_rate_limiter, "client", None) is not None:
+        metrics_store = RedisMetricsStore(
+            active_rate_limiter.client,
+            os.getenv("METRICS_REDIS_PREFIX", "sift:metrics"),
+            int(os.getenv("METRICS_RETENTION_SECONDS", "604800")),
+        )
+    admin_dependency = create_admin_dependency(auth_verifier)
+    admin_metrics_window_minutes = int(
+        os.getenv("ADMIN_METRICS_WINDOW_MINUTES", "1440")
+    )
+    if admin_metrics_window_minutes <= 0:
+        raise RuntimeError("ADMIN_METRICS_WINDOW_MINUTES must be positive")
+    rate_limit_dependency = create_rate_limit_dependency(
+        active_rate_limiter,
+        auth_verifier,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -505,6 +575,9 @@ def create_app(service: Any | None = None) -> FastAPI:
         try:
             yield
         finally:
+            close_limiter = getattr(active_rate_limiter, "close", None)
+            if close_limiter is not None:
+                await close_limiter()
             if service is None:
                 await active_service.close()
 
@@ -514,6 +587,13 @@ def create_app(service: Any | None = None) -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.request_metrics = RequestMetrics()
+    app.state.request_logger = logger
+    app.state.metrics_store = metrics_store
+    # Add the payload middleware first so the request metrics middleware wraps
+    # it and records rejected 413 responses as well.
+    app.add_middleware(PayloadSizeLimitMiddleware, max_bytes=max_request_bytes)
+    app.add_middleware(RequestMetricsMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=configured_cors_origins(),
@@ -526,9 +606,32 @@ def create_app(service: Any | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/metrics", response_model=MetricsResponse)
+    async def metrics() -> MetricsResponse:
+        """Expose low-cardinality process metrics for Cloud Run monitoring."""
+
+        return MetricsResponse(**app.state.request_metrics.snapshot())
+
+    @app.get("/admin/metrics", response_model=ProductionMetricsResponse)
+    async def production_metrics(
+        _rate_claims: dict[str, Any] | None = Depends(rate_limit_dependency),
+        _admin_claims: dict[str, Any] = Depends(admin_dependency),
+    ) -> ProductionMetricsResponse:
+        if app.state.metrics_store is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Production metrics are not configured",
+            )
+        try:
+            return ProductionMetricsResponse(
+                **await app.state.metrics_store.snapshot(admin_metrics_window_minutes)
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     @app.get("/stats/log-levels", response_model=LogLevelStatsResponse)
     async def log_level_stats(
-        _claims: dict[str, Any] | None = Depends(auth_verifier),
+        _claims: dict[str, Any] | None = Depends(rate_limit_dependency),
     ) -> LogLevelStatsResponse:
         try:
             return LogLevelStatsResponse(
@@ -543,7 +646,7 @@ def create_app(service: Any | None = None) -> FastAPI:
     @app.post("/ask", response_model=AskResponse)
     async def ask(
         request: AskRequest,
-        _claims: dict[str, Any] | None = Depends(auth_verifier),
+        _claims: dict[str, Any] | None = Depends(rate_limit_dependency),
     ) -> AskResponse:
         question = request.question.strip()
         if not question:

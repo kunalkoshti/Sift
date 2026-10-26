@@ -219,8 +219,9 @@ VERCEL_PROJECT_ID
 
 The Vercel project should use `frontend` as its root directory and have
 `VITE_API_URL` configured for the Production environment. The Cloud Run service must
-already have its runtime settings and secrets, including `POSTGRES_DSN`, `LLM_MODEL`,
-and the LLM API key.
+already have its runtime settings and secrets, including `POSTGRES_DSN`,
+`LIVE_REDIS_URL` as a GitHub secret for the shared Redis instance, `LLM_MODEL`,
+and the LLM API key. The API deployment maps `LIVE_REDIS_URL` to `REDIS_URL`.
 
 The frontend supports Supabase email/password and Google OAuth sign-in. Configure
 both providers in Supabase Authentication, add the local and Vercel URLs to the
@@ -236,6 +237,50 @@ When the API is deployed by the workflow, it sets `AUTH_REQUIRED=true` and
 derives the Supabase JWKS and issuer URLs from `SUPABASE_URL`. `/health` remains
 public for Cloud Run probes; `/ask` and `/stats/log-levels` require a valid
 Supabase access token. The API does not receive or store the Google client secret.
+
+### API protection and monitoring
+
+The API applies three lightweight operational safeguards:
+
+- `MAX_REQUEST_BYTES` rejects oversized request bodies with HTTP `413` before
+  authentication or LLM work. The default is 16 KiB.
+- `RATE_LIMIT_REQUESTS` requests per `RATE_LIMIT_WINDOW_SECONDS` are allowed per
+  verified Supabase user. When authentication is disabled locally, the limiter
+  falls back to the client IP. The default is 30 requests per 60 seconds and
+  excess requests receive HTTP `429` with a `Retry-After` header.
+- `GET /metrics` exposes low-cardinality request counters, status codes, route
+  counts, rate-limit rejections, payload rejections, and process uptime. Every
+  request also emits a structured `http_request` log with status and latency,
+  which can be queried in Cloud Run Logs Explorer.
+- Authenticated administrators can use `GET /admin/metrics` to view Redis-backed
+  minute buckets for request volume, 5xx errors, rate-limit events, rejected
+  payloads, average latency, and approximate unique authenticated visitors.
+  Access is controlled by the backend
+  `ADMIN_EMAILS` and/or `ADMIN_USER_IDS` allowlists.
+
+Rate-limit state is stored in Redis using an atomic sorted-set sliding window,
+so limits remain shared if Cloud Run adds instances. The Redis key prefix is
+configurable through `REDIS_RATE_LIMIT_PREFIX` and is separate from the log
+stream. If Redis is unavailable, protected endpoints return HTTP `503` rather
+than silently serving requests without rate-limit protection. The counters and
+uptime in `/metrics` remain process-local and reset when an instance restarts;
+they are operational diagnostics, not a durable audit log.
+
+Example checks:
+
+~~~bash
+curl -fsS "$LOG_API_URL/health" | jq
+curl -fsS "$LOG_API_URL/metrics" | jq
+
+# This requires a Supabase access token for an allowlisted administrator.
+curl -fsS "$LOG_API_URL/admin/metrics" \
+  -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" | jq
+
+# The API should reject a request without a Supabase access token when deployed.
+curl -i -X POST "$LOG_API_URL/ask" \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Why did payment authorization time out?"}'
+~~~
 
 ## Evaluation
 

@@ -28,6 +28,11 @@ redirect URLs. The frontend sends the Supabase access token to `/ask` and
 architecture page remains available without signing in, while the chat and
 live corpus panels require an authenticated session.
 
+If you are the administrator, set `VITE_ADMIN_EMAILS` to your comma-separated
+Supabase email address(es) to display the private Production metrics page. The
+backend independently enforces the `ADMIN_EMAILS`/`ADMIN_USER_IDS` allowlist on
+`/admin/metrics`; the frontend variable only controls visibility of the link.
+
 ## Build
 
 ```bash

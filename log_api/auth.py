@@ -124,3 +124,37 @@ class SupabaseJWTVerifier:
             audience=self.config.audience,
             issuer=self.config.issuer,
         )
+
+
+def _csv_values(name: str) -> frozenset[str]:
+    return frozenset(
+        value.strip().casefold()
+        for value in (os.getenv(name) or "").split(",")
+        if value.strip()
+    )
+
+
+def create_admin_dependency(auth_dependency: Any):
+    """Authorize a private admin endpoint using verified Supabase claims."""
+
+    allowed_ids = _csv_values("ADMIN_USER_IDS")
+    allowed_emails = _csv_values("ADMIN_EMAILS")
+
+    async def dependency(
+        claims: dict[str, Any] | None = Depends(auth_dependency),
+    ) -> dict[str, Any]:
+        if not claims:
+            raise HTTPException(
+                status_code=403,
+                detail="Admin access requires an authenticated account",
+            )
+        user_id = str(claims.get("sub") or claims.get("user_id") or "").casefold()
+        email = str(claims.get("email") or "").casefold()
+        if (user_id and user_id in allowed_ids) or (email and email in allowed_emails):
+            return claims
+        raise HTTPException(
+            status_code=403,
+            detail="This account is not authorized to view production metrics",
+        )
+
+    return dependency

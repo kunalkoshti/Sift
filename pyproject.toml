@@ -51,6 +51,7 @@ log_api = [
     "langchain-ollama>=0.2,<1",
     "numpy>=1.26,<3",
     "python-dotenv>=1,<2",
+    "redis>=5,<6",
     "sentence-transformers>=3,<6",
     "transformers>=4.41,<5",
     "uvicorn[standard]>=0.30,<1",
