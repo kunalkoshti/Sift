@@ -1,4 +1,8 @@
 # Sift
+[![CI](https://github.com/kunalkoshti/Sift/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunalkoshti/Sift/actions/workflows/ci.yml)
+[![Vercel](https://img.shields.io/badge/Vercel-Live-black?logo=vercel&logoColor=white)](https://sift-beta.vercel.app/)
+[![Cloud Run](https://img.shields.io/badge/Cloud%20Run-API-4285F4?logo=googlecloud&logoColor=white)](https://sift-log-api-221073963274.us-east1.run.app)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Sift is an incident-investigation application for structured application logs. It
 turns noisy service logs into searchable evidence, trace-aware incident context,
